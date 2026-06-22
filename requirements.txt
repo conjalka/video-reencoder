@@ -1,0 +1,22 @@
+# Video Reencoding Script Requirements
+
+# Python 3.7+ required
+
+# Optional: Progress bar support (highly recommended)
+tqdm>=4.65.0
+
+# Standard library modules used (no installation needed):
+# - os
+# - sys
+# - json
+# - subprocess
+# - logging
+# - argparse
+# - re
+# - shutil
+# - pathlib
+# - datetime
+# - typing
+
+# External dependency (must be installed separately):
+# - HandBrakeCLI (see HANDBRAKE_INSTALLATION.md)

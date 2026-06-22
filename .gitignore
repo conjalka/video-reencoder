@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*_temp.mkv
+*.tmp
+*.backup
+
+# State files
+.reencoding_state.json
+
+# Backup directories
+backups/
+
+# Test videos (optional - uncomment if you don't want to commit test videos)
+# test_videos/
+# sample_videos/
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Project specific
+config.local.json
+
+# Made with Bob

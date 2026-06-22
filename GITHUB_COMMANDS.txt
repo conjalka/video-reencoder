@@ -1,0 +1,85 @@
+# Quick GitHub Setup Commands
+# Copy and paste these commands in order
+
+# ============================================
+# STEP 1: Initialize Git Repository
+# ============================================
+
+git init
+git add .
+git commit -m "Initial commit: Video Reencoder v2.0.0 with 7 enhancements"
+
+
+# ============================================
+# STEP 2: Create GitHub Repository
+# ============================================
+
+# Go to: https://github.com/new
+# Repository name: video-reencoder
+# Description: Automated video reencoding to HEVC/H.265 with GPU acceleration and parallel processing
+# Public or Private: Your choice
+# DO NOT initialize with README, .gitignore, or license
+# Click "Create repository"
+
+
+# ============================================
+# STEP 3: Connect and Push
+# ============================================
+
+# Replace YOUR_USERNAME with your GitHub username
+git remote add origin https://github.com/YOUR_USERNAME/video-reencoder.git
+git branch -M main
+git push -u origin main
+
+
+# ============================================
+# STEP 4: Create Release Tag
+# ============================================
+
+git tag -a v2.0.0 -m "Release v2.0.0: Major enhancements - Resume, GPU acceleration, parallel processing"
+git push origin v2.0.0
+
+
+# ============================================
+# STEP 5: Create Release on GitHub
+# ============================================
+
+# Go to: https://github.com/YOUR_USERNAME/video-reencoder/releases/new
+# Choose tag: v2.0.0
+# Release title: v2.0.0 - Major Enhancements Release
+# Copy description from CHANGELOG.md
+# Click "Publish release"
+
+
+# ============================================
+# Future Updates
+# ============================================
+
+# After making changes:
+git add .
+git commit -m "Description of your changes"
+git push
+
+# For new releases:
+git tag -a v2.1.0 -m "Release v2.1.0: Description"
+git push origin v2.1.0
+
+
+# ============================================
+# Troubleshooting
+# ============================================
+
+# Check git status
+git status
+
+# Check remote
+git remote -v
+
+# View commit history
+git log --oneline
+
+# Undo last commit (keep changes)
+git reset --soft HEAD~1
+
+# Undo last commit (discard changes)
+git reset --hard HEAD~1

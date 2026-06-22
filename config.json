@@ -1,0 +1,44 @@
+{
+  "handbrake": {
+    "path": "HandBrakeCLI",
+    "encoder": "x265",
+    "scan_timeout": 60,
+    "preset_map": {
+      "4K_60fps": "H.265 MKV 2160p60 4K",
+      "4K_30fps": "H.265 MKV 2160p30 4K",
+      "1080p_60fps": "H.265 MKV 1080p30",
+      "1080p_30fps": "H.265 MKV 1080p30",
+      "720p_60fps": "H.265 MKV 720p30",
+      "720p_30fps": "H.265 MKV 720p30",
+      "480p_30fps": "H.265 MKV 480p30"
+    }
+  },
+  "video_extensions": [
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".flv",
+    ".mpg",
+    ".mpeg",
+    ".m2ts",
+    ".ts",
+    ".vob",
+    ".3gp",
+    ".webm"
+  ],
+  "processing": {
+    "skip_hevc": true,
+    "output_format": "mkv",
+    "delete_original": true,
+    "create_backup": false,
+    "backup_suffix": ".backup"
+  },
+  "logging": {
+    "log_directory": "logs",
+    "log_level": "INFO",
+    "console_output": true
+  }
+}

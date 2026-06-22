@@ -1,0 +1,754 @@
+#!/usr/bin/env python3
+"""
+Video Reencoding Script
+Automatically converts video files to HEVC/H.265 format using HandBrake
+"""
+
+import os
+import sys
+import json
+import subprocess
+import logging
+import argparse
+import re
+import shutil
+import multiprocessing
+from pathlib import Path
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Try to import tqdm for progress bars
+try:
+    from tqdm import tqdm as tqdm_progress
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    tqdm_progress = None
+
+# Supported video extensions (HandBrake compatible)
+VIDEO_EXTENSIONS = {
+    '.mp4', '.m4v', '.mkv', '.avi', '.mov', '.wmv', '.flv', 
+    '.mpg', '.mpeg', '.m2ts', '.ts', '.vob', '.3gp', '.webm'
+}
+
+# HandBrake preset mapping based on resolution and framerate
+PRESET_MAP = {
+    # 4K presets
+    (3840, 2160, 60): "H.265 MKV 2160p60 4K",
+    (3840, 2160, 30): "H.265 MKV 2160p30 4K",
+    (3840, 2160, 24): "H.265 MKV 2160p30 4K",
+    # 1080p presets
+    (1920, 1080, 60): "H.265 MKV 1080p30",
+    (1920, 1080, 30): "H.265 MKV 1080p30",
+    (1920, 1080, 24): "H.265 MKV 1080p30",
+    # 720p presets
+    (1280, 720, 60): "H.265 MKV 720p30",
+    (1280, 720, 30): "H.265 MKV 720p30",
+    (1280, 720, 24): "H.265 MKV 720p30",
+    # 480p presets
+    (720, 480, 30): "H.265 MKV 480p30",
+    (720, 480, 24): "H.265 MKV 480p30",
+}
+
+# Quality presets
+QUALITY_PRESETS = {
+    'fast': {'crf': 28, 'preset': 'fast'},
+    'balanced': {'crf': 23, 'preset': 'medium'},
+    'best': {'crf': 20, 'preset': 'slow'}
+}
+
+# GPU encoder options
+GPU_ENCODERS = {
+    'nvenc': 'nvenc_h265',      # NVIDIA GPU
+    'qsv': 'qsv_h265',           # Intel QuickSync
+    'vce': 'vce_h265',           # AMD VCE
+    'videotoolbox': 'vt_h265',   # Apple VideoToolbox (macOS)
+    'none': 'x265'               # CPU encoding (default)
+}
+
+
+class VideoReencoder:
+    """Main class for video reencoding operations"""
+    
+    def __init__(self, source_dir: str, log_file: str = "reencoding.log",
+                 dry_run: bool = False, handbrake_path: str = "HandBrakeCLI",
+                 resume: bool = True, skip_encoded: bool = True,
+                 backup_dir: Optional[str] = None, quality: str = 'balanced',
+                 parallel: int = 1, gpu_encoder: str = 'none'):
+        self.source_dir = Path(source_dir).resolve()
+        self.log_file = log_file
+        self.dry_run = dry_run
+        self.handbrake_path = handbrake_path
+        self.resume = resume
+        self.skip_encoded = skip_encoded
+        self.backup_dir = Path(backup_dir) if backup_dir else None
+        self.quality = quality
+        self.parallel = max(1, min(parallel, multiprocessing.cpu_count()))
+        self.gpu_encoder = gpu_encoder if gpu_encoder in GPU_ENCODERS else 'none'
+        self.encoder = GPU_ENCODERS[self.gpu_encoder]
+        self.state_file = self.source_dir / '.reencoding_state.json'
+        self.processed_files = set()
+        self.stats = {
+            'total_files': 0,
+            'processed': 0,
+            'skipped': 0,
+            'skipped_encoded': 0,
+            'failed': 0,
+            'space_saved': 0
+        }
+        self.stats_lock = multiprocessing.Lock() if parallel > 1 else None
+        
+        # Load state if resuming
+        if self.resume:
+            self._load_state()
+        
+        # Setup backup directory
+        if self.backup_dir:
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup logging
+        self._setup_logging()
+        
+    def _setup_logging(self):
+        """Configure logging to both file and console"""
+        # Create logs directory if it doesn't exist
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        # Create timestamped log file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = log_dir / f"{timestamp}_{self.log_file}"
+        
+        # Configure logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_path),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Video Reencoder started - Log file: {log_path}")
+        self.logger.info(f"Source directory: {self.source_dir}")
+        self.logger.info(f"Encoder: {self.encoder} ({self.gpu_encoder})")
+        if self.gpu_encoder != 'none':
+            self.logger.info(f"GPU acceleration enabled: {self.gpu_encoder.upper()}")
+        if self.dry_run:
+            self.logger.info("DRY RUN MODE - No files will be modified")
+    def _load_state(self):
+        """Load previously processed files from state file"""
+        if self.state_file.exists():
+            try:
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                    self.processed_files = set(state.get('processed_files', []))
+                    self.logger.info(f"Resuming: {len(self.processed_files)} files already processed")
+            except Exception as e:
+                self.logger.warning(f"Could not load state file: {e}")
+                self.processed_files = set()
+        else:
+            self.processed_files = set()
+    
+    def _save_state(self):
+        """Save processed files to state file"""
+        try:
+            state = {
+                'processed_files': list(self.processed_files),
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Could not save state file: {e}")
+    
+    def _is_already_encoded(self, filename: str) -> bool:
+        """Check if filename indicates it's already HEVC encoded"""
+        # Pattern: [resolution fps HEVC]
+        hevc_pattern = r'\[.*HEVC\]'
+        return bool(re.search(hevc_pattern, filename, re.IGNORECASE))
+    
+    def _backup_file(self, file_path: Path) -> bool:
+        """Backup file before deletion"""
+        if not self.backup_dir:
+            return True
+        
+        try:
+            # Preserve directory structure in backup
+            rel_path = file_path.relative_to(self.source_dir)
+            backup_path = self.backup_dir / rel_path
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            shutil.copy2(file_path, backup_path)
+            self.logger.info(f"Backed up to: {backup_path}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to backup file: {e}")
+            return False
+    
+    
+    def check_handbrake(self) -> bool:
+        """Verify HandBrakeCLI is installed and accessible"""
+        try:
+            result = subprocess.run(
+                [self.handbrake_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                version = result.stdout.strip().split('\n')[0]
+                self.logger.info(f"HandBrakeCLI found: {version}")
+                return True
+            else:
+                self.logger.error("HandBrakeCLI not found or not working properly")
+                return False
+        except FileNotFoundError:
+            self.logger.error(f"HandBrakeCLI not found at: {self.handbrake_path}")
+            self.logger.error("Please install HandBrakeCLI or specify the correct path")
+            return False
+        except Exception as e:
+            self.logger.error(f"Error checking HandBrakeCLI: {e}")
+            return False
+    
+    def get_video_info(self, video_path: Path) -> Optional[Dict]:
+        """Extract video information using HandBrakeCLI"""
+        try:
+            self.logger.debug(f"Scanning video: {video_path.name}")
+            result = subprocess.run(
+                [self.handbrake_path, "--scan", "--json", "-i", str(video_path)],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0:
+                self.logger.warning(f"Failed to scan {video_path.name}")
+                return None
+            
+            # Parse JSON output
+            try:
+                # HandBrake outputs JSON in stderr
+                json_data = json.loads(result.stderr)
+                title_info = json_data.get('TitleList', [{}])[0]
+                
+                # Extract relevant information
+                video_codec = title_info.get('VideoCodec', 'unknown')
+                width = title_info.get('Geometry', {}).get('Width', 0)
+                height = title_info.get('Geometry', {}).get('Height', 0)
+                fps_num = title_info.get('FrameRate', {}).get('Num', 30)
+                fps_den = title_info.get('FrameRate', {}).get('Den', 1)
+                fps = round(fps_num / fps_den) if fps_den > 0 else 30
+                
+                return {
+                    'codec': video_codec,
+                    'width': width,
+                    'height': height,
+                    'fps': fps,
+                    'is_hevc': 'hevc' in video_codec.lower() or 'h265' in video_codec.lower() or 'h.265' in video_codec.lower()
+                }
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                self.logger.warning(f"Failed to parse video info for {video_path.name}: {e}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"Timeout scanning {video_path.name}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting video info for {video_path.name}: {e}")
+            return None
+    
+    def select_preset(self, width: int, height: int, fps: int) -> str:
+        """Select appropriate HandBrake preset based on video properties"""
+        # Round fps to nearest common value
+        if fps > 50:
+            fps_key = 60
+        elif fps > 25:
+            fps_key = 30
+        else:
+            fps_key = 24
+        
+        # Try exact match first
+        key = (width, height, fps_key)
+        if key in PRESET_MAP:
+            return PRESET_MAP[key]
+        
+        # Try resolution match with different fps
+        for (w, h, f), preset in PRESET_MAP.items():
+            if w == width and h == height:
+                return preset
+        
+        # Fall back to closest resolution
+        if height >= 2160:
+            return "H.265 MKV 2160p30 4K"
+        elif height >= 1080:
+            return "H.265 MKV 1080p30"
+        elif height >= 720:
+            return "H.265 MKV 720p30"
+        else:
+            return "H.265 MKV 480p30"
+    
+    def find_video_files(self) -> List[Path]:
+        """Recursively find all video files in source directory"""
+        self.logger.info(f"Scanning for video files in: {self.source_dir}")
+        video_files = []
+        skipped_encoded = 0
+        skipped_processed = 0
+        
+        for root, dirs, files in os.walk(self.source_dir):
+            for file in files:
+                file_path = Path(root) / file
+                if file_path.suffix.lower() in VIDEO_EXTENSIONS:
+                    # Skip if already in processed list (resume feature)
+                    if str(file_path) in self.processed_files:
+                        skipped_processed += 1
+                        continue
+                    
+                    # Skip if filename indicates already encoded
+                    if self.skip_encoded and self._is_already_encoded(file):
+                        skipped_encoded += 1
+                        self.logger.debug(f"Skipping already encoded: {file}")
+                        continue
+                    
+                    video_files.append(file_path)
+        
+        self.logger.info(f"Found {len(video_files)} video files to process")
+        if skipped_processed > 0:
+            self.logger.info(f"Skipped {skipped_processed} already processed files (resume)")
+        if skipped_encoded > 0:
+            self.logger.info(f"Skipped {skipped_encoded} already encoded files")
+        
+        self.stats['skipped_encoded'] = skipped_encoded
+        return video_files
+    
+    def format_size(self, size_bytes: int) -> str:
+        """Format file size in human-readable format"""
+        size = float(size_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} PB"
+    
+    def reencode_video(self, video_path: Path) -> bool:
+        """Reencode a single video file to HEVC"""
+        try:
+            self.logger.info(f"\n{'='*80}")
+            self.logger.info(f"Processing: {video_path}")
+            
+            # Get video information
+            video_info = self.get_video_info(video_path)
+            if not video_info:
+                self.logger.error(f"Could not get video info, skipping: {video_path.name}")
+                self.stats['failed'] += 1
+                return False
+            
+            # Check if already HEVC
+            if video_info['is_hevc']:
+                self.logger.info(f"Already HEVC encoded, skipping: {video_path.name}")
+                self.stats['skipped'] += 1
+                return True
+            
+            # Log video properties
+            self.logger.info(f"Codec: {video_info['codec']}")
+            self.logger.info(f"Resolution: {video_info['width']}x{video_info['height']}")
+            self.logger.info(f"FPS: {video_info['fps']}")
+            
+            # Select appropriate preset
+            preset = self.select_preset(
+                video_info['width'], 
+                video_info['height'], 
+                video_info['fps']
+            )
+            self.logger.info(f"Selected preset: {preset}")
+            
+            # Get quality settings
+            quality_settings = QUALITY_PRESETS.get(self.quality, QUALITY_PRESETS['balanced'])
+            self.logger.info(f"Quality: {self.quality} (CRF: {quality_settings['crf']}, Preset: {quality_settings['preset']})")
+            
+            # Get original file size
+            original_size = video_path.stat().st_size
+            self.logger.info(f"Original size: {self.format_size(original_size)}")
+            
+            if self.dry_run:
+                self.logger.info("DRY RUN: Would reencode this file")
+                self.stats['processed'] += 1
+                return True
+            
+            # Create temporary output file
+            output_path = video_path.parent / f"{video_path.stem}_temp.mkv"
+            
+            # Build HandBrake command with quality settings
+            cmd = [
+                self.handbrake_path,
+                "-i", str(video_path),
+                "-o", str(output_path),
+                "--preset", preset,
+                "--encoder", self.encoder
+            ]
+            
+            # Add quality settings (CPU encoders only)
+            if self.gpu_encoder == 'none':
+                cmd.extend([
+                    "--encoder-preset", quality_settings['preset'],
+                    "--quality", str(quality_settings['crf'])
+                ])
+            else:
+                # GPU encoders use different quality settings
+                cmd.extend([
+                    "--encoder-preset", "quality",  # or "speed" for faster
+                    "--quality", str(quality_settings['crf'])
+                ])
+            
+            self.logger.info("Starting reencoding...")
+            self.logger.info(f"Command: {' '.join(cmd)}")
+            
+            # Run HandBrake with real-time progress
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            # Monitor progress
+            if process.stdout:
+                for line in process.stdout:
+                    line = line.strip()
+                    if line:
+                        # HandBrake progress lines contain "Encoding:"
+                        if "Encoding:" in line or "%" in line:
+                            print(f"\r{line}", end='', flush=True)
+                        else:
+                            self.logger.debug(line)
+            
+            print()  # New line after progress
+            process.wait()
+            
+            if process.returncode != 0:
+                self.logger.error(f"HandBrake failed with return code {process.returncode}")
+                if output_path.exists():
+                    output_path.unlink()
+                self.stats['failed'] += 1
+                return False
+            
+            # Check if output file was created
+            if not output_path.exists():
+                self.logger.error("Output file was not created")
+                self.stats['failed'] += 1
+                return False
+            
+            # Get new file size
+            new_size = output_path.stat().st_size
+            size_diff = original_size - new_size
+            percent_saved = (size_diff / original_size) * 100 if original_size > 0 else 0
+            
+            self.logger.info(f"New size: {self.format_size(new_size)}")
+            self.logger.info(f"Space saved: {self.format_size(size_diff)} ({percent_saved:.1f}%)")
+            
+            # Replace original file with reencoded version
+            self.logger.info("Replacing original file...")
+            
+            # Backup original if requested
+            if self.backup_dir:
+                if not self._backup_file(video_path):
+                    self.logger.warning("Backup failed, but continuing with replacement")
+            
+            # Delete original
+            video_path.unlink()
+            
+            # Create new filename with encoding info
+            # Format: original_name [resolution fps HEVC].mkv
+            resolution = f"{video_info['height']}p"
+            fps = video_info['fps']
+            encoding_info = f"[{resolution}{fps} HEVC]"
+            final_path = video_path.parent / f"{video_path.stem} {encoding_info}.mkv"
+            output_path.rename(final_path)
+            
+            self.logger.info(f"Successfully reencoded: {final_path.name}")
+            
+            # Add to processed files and save state
+            self.processed_files.add(str(video_path))
+            self._save_state()
+            
+            self.stats['processed'] += 1
+            self.stats['space_saved'] += size_diff
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error reencoding {video_path.name}: {e}")
+            self.stats['failed'] += 1
+            # Clean up temp file if it exists
+            output_path = video_path.parent / f"{video_path.stem}_temp.mkv"
+            if output_path.exists():
+                try:
+                    output_path.unlink()
+                except:
+                    pass
+            return False
+    
+    def _process_single_file_wrapper(self, args):
+        """Wrapper for parallel processing - unpacks arguments and processes file"""
+        video_path, idx, total = args
+        try:
+            if not TQDM_AVAILABLE and self.parallel == 1:
+                self.logger.info(f"\n[{idx}/{total}] Processing file {idx} of {total}")
+            return self.reencode_video(video_path)
+        except Exception as e:
+            self.logger.error(f"Error processing {video_path}: {e}")
+            return False
+    
+    def process_all(self):
+        """Process all video files in the source directory"""
+        # Check HandBrake installation
+        if not self.check_handbrake():
+            self.logger.error("Cannot proceed without HandBrakeCLI")
+            return
+        
+        # Find all video files
+        video_files = self.find_video_files()
+        self.stats['total_files'] = len(video_files)
+        
+        if not video_files:
+            self.logger.info("No video files found to process")
+            return
+        
+        # Process files
+        if self.parallel > 1:
+            self._process_parallel(video_files)
+        else:
+            self._process_sequential(video_files)
+        
+        # Print final statistics
+        self.print_statistics()
+    
+    def _process_sequential(self, video_files: List[Path]):
+        """Process files one at a time (original behavior)"""
+        self.logger.info(f"\nStarting sequential processing of {len(video_files)} files...")
+        
+        # Use tqdm progress bar if available
+        if TQDM_AVAILABLE and tqdm_progress and not self.dry_run:
+            video_iterator = tqdm_progress(video_files, desc="Processing videos", unit="file")
+        else:
+            video_iterator = video_files
+        
+        for idx, video_path in enumerate(video_iterator, 1):
+            if not TQDM_AVAILABLE:
+                self.logger.info(f"\n[{idx}/{len(video_files)}] Processing file {idx} of {len(video_files)}")
+            self.reencode_video(video_path)
+    
+    def _process_parallel(self, video_files: List[Path]):
+        """Process multiple files in parallel"""
+        self.logger.info(f"\nStarting parallel processing of {len(video_files)} files...")
+        self.logger.info(f"Using {self.parallel} parallel workers")
+        
+        # Prepare arguments for parallel processing
+        args_list = [(video_path, idx, len(video_files))
+                     for idx, video_path in enumerate(video_files, 1)]
+        
+        # Use ProcessPoolExecutor for parallel processing
+        with ProcessPoolExecutor(max_workers=self.parallel) as executor:
+            # Submit all tasks
+            futures = {executor.submit(self._process_single_file_wrapper, args): args[0]
+                      for args in args_list}
+            
+            # Use tqdm progress bar if available
+            if TQDM_AVAILABLE and tqdm_progress:
+                futures_iterator = tqdm_progress(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc="Processing videos",
+                    unit="file"
+                )
+            else:
+                futures_iterator = as_completed(futures)
+            
+            # Process results as they complete
+            completed = 0
+            for future in futures_iterator:
+                completed += 1
+                video_path = futures[future]
+                try:
+                    result = future.result()
+                    if not TQDM_AVAILABLE:
+                        self.logger.info(f"Completed {completed}/{len(video_files)}: {video_path.name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to process {video_path.name}: {e}")
+    
+    def print_statistics(self):
+        """Print final processing statistics"""
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info("PROCESSING COMPLETE")
+        self.logger.info(f"{'='*80}")
+        self.logger.info(f"Total files found: {self.stats['total_files']}")
+        self.logger.info(f"Successfully processed: {self.stats['processed']}")
+        self.logger.info(f"Skipped (already HEVC): {self.stats['skipped']}")
+        if self.stats['skipped_encoded'] > 0:
+            self.logger.info(f"Skipped (already encoded in filename): {self.stats['skipped_encoded']}")
+        self.logger.info(f"Failed: {self.stats['failed']}")
+        self.logger.info(f"Total space saved: {self.format_size(self.stats['space_saved'])}")
+        if self.backup_dir:
+            self.logger.info(f"Backups saved to: {self.backup_dir}")
+        self.logger.info(f"{'='*80}")
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Recursively reencode video files to HEVC/H.265 format",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process all videos in a directory
+  python video_reencoder.py /path/to/videos
+
+  # Dry run to see what would be processed
+  python video_reencoder.py /path/to/videos --dry-run
+
+  # Use best quality preset with backup
+  python video_reencoder.py /path/to/videos --quality best --backup-dir ./backups
+
+  # Process 4 files in parallel (much faster!)
+  python video_reencoder.py /path/to/videos --parallel 4
+
+  # Use NVIDIA GPU acceleration (5-10x faster!)
+  python video_reencoder.py /path/to/videos --gpu nvenc
+
+  # Combine GPU + parallel for maximum speed
+  python video_reencoder.py /path/to/videos --gpu nvenc --parallel 2
+
+  # Resume previous session, skip encoded files
+  python video_reencoder.py /path/to/videos --resume --skip-encoded
+
+  # Specify custom HandBrakeCLI path
+  python video_reencoder.py /path/to/videos --handbrake-path /usr/local/bin/HandBrakeCLI
+        """
+    )
+    
+    parser.add_argument(
+        'source_dir',
+        help='Source directory containing video files to reencode'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Perform a dry run without actually reencoding files'
+    )
+    
+    parser.add_argument(
+        '--handbrake-path',
+        default='HandBrakeCLI',
+        help='Path to HandBrakeCLI executable (default: HandBrakeCLI)'
+    )
+    
+    parser.add_argument(
+        '--log-file',
+        default='reencoding.log',
+        help='Name of the log file (default: reencoding.log)'
+    )
+    
+    parser.add_argument(
+        '--no-resume',
+        action='store_true',
+        help='Do not resume from previous session (start fresh)'
+    )
+    
+    parser.add_argument(
+        '--no-skip-encoded',
+        action='store_true',
+        help='Do not skip files with [*HEVC] in filename'
+    )
+    
+    parser.add_argument(
+        '--backup-dir',
+        help='Directory to backup original files before deletion'
+    )
+    
+    parser.add_argument(
+        '--quality',
+        choices=['fast', 'balanced', 'best'],
+        default='balanced',
+        help='Encoding quality preset: fast (CRF 28), balanced (CRF 23), best (CRF 20) (default: balanced)'
+    )
+    
+    parser.add_argument(
+        '--reset',
+        action='store_true',
+        help='Reset state file and start fresh (clears resume data)'
+    )
+    
+    parser.add_argument(
+        '--parallel',
+        type=int,
+        default=1,
+        metavar='N',
+        help='Number of files to process in parallel (default: 1, max: CPU cores)'
+    )
+    
+    parser.add_argument(
+        '--gpu',
+        choices=['none', 'nvenc', 'qsv', 'vce', 'videotoolbox'],
+        default='none',
+        help='GPU encoder: nvenc (NVIDIA), qsv (Intel), vce (AMD), videotoolbox (Apple), none (CPU) (default: none)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate source directory
+    if not os.path.isdir(args.source_dir):
+        print(f"Error: Source directory does not exist: {args.source_dir}")
+        sys.exit(1)
+    
+    # Handle reset flag
+    if args.reset:
+        state_file = Path(args.source_dir) / '.reencoding_state.json'
+        if state_file.exists():
+            state_file.unlink()
+            print(f"Reset: Cleared state file")
+    
+    # Show warning if tqdm not available
+    if not TQDM_AVAILABLE:
+        print("Note: Install 'tqdm' for progress bars: pip install tqdm")
+    
+    # Validate parallel workers
+    if args.parallel > 1:
+        max_workers = multiprocessing.cpu_count()
+        if args.parallel > max_workers:
+            print(f"Warning: Requested {args.parallel} workers, but only {max_workers} CPU cores available")
+            print(f"Using {max_workers} workers instead")
+            args.parallel = max_workers
+    
+    # Create reencoder instance and process
+    reencoder = VideoReencoder(
+        source_dir=args.source_dir,
+        log_file=args.log_file,
+        dry_run=args.dry_run,
+        handbrake_path=args.handbrake_path,
+        resume=not args.no_resume,
+        skip_encoded=not args.no_skip_encoded,
+        backup_dir=args.backup_dir,
+        quality=args.quality,
+        parallel=args.parallel,
+        gpu_encoder=args.gpu
+    )
+    
+    try:
+        reencoder.process_all()
+    except KeyboardInterrupt:
+        reencoder.logger.info("\n\nProcess interrupted by user")
+        reencoder.print_statistics()
+        sys.exit(0)
+    except Exception as e:
+        reencoder.logger.error(f"Unexpected error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
+
+# Made with Bob
