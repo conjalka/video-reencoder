@@ -1,6 +1,6 @@
 # Video Reencoding Script
 
-A Python script that automatically converts video files to HEVC/H.265 format using HandBrake, reducing file sizes while maintaining quality.
+A Python script that automatically converts video files to HEVC/H.265 format using HandBrake, reducing file sizes while maintaining quality.  Created with the help of IBM Bob!
 
 ## Features
 
