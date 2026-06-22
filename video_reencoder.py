@@ -229,8 +229,21 @@ class VideoReencoder:
             
             # Parse JSON output
             try:
-                # HandBrake outputs JSON in stderr
-                json_data = json.loads(result.stderr)
+                # HandBrake outputs JSON in stderr, but may include other text
+                # Try to extract just the JSON portion
+                stderr_output = result.stderr
+                
+                # Find the JSON object (starts with { and ends with })
+                json_start = stderr_output.find('{')
+                json_end = stderr_output.rfind('}')
+                
+                if json_start == -1 or json_end == -1:
+                    self.logger.warning(f"No JSON found in HandBrake output for {video_path.name}")
+                    self.logger.debug(f"HandBrake stderr: {stderr_output[:500]}")
+                    return None
+                
+                json_str = stderr_output[json_start:json_end + 1]
+                json_data = json.loads(json_str)
                 title_info = json_data.get('TitleList', [{}])[0]
                 
                 # Extract relevant information
