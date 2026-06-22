@@ -59,11 +59,25 @@ Quick install:
 1. Clone or download this repository
 
 2. Install optional dependencies (recommended):
+   
+   **Windows:**
+   ```powershell
+   py -m pip install -r requirements.txt
+   ```
+   
+   **macOS/Linux:**
    ```bash
    pip install -r requirements.txt
    ```
    
    Or install tqdm manually for progress bars:
+   
+   **Windows:**
+   ```powershell
+   py -m pip install tqdm
+   ```
+   
+   **macOS/Linux:**
    ```bash
    pip install tqdm
    ```
