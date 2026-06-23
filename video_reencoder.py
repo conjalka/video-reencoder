@@ -13,6 +13,7 @@ import argparse
 import re
 import shutil
 import multiprocessing
+import ctypes
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
@@ -66,6 +67,36 @@ GPU_ENCODERS = {
     'videotoolbox': 'vt_h265',   # Apple VideoToolbox (macOS)
     'none': 'x265'               # CPU encoding (default)
 }
+
+
+# Windows sleep prevention constants
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
+
+
+def prevent_sleep():
+    """Prevent system from sleeping (Windows only)"""
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+            )
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def allow_sleep():
+    """Allow system to sleep again (Windows only)"""
+    if sys.platform == 'win32':
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 class VideoReencoder:
@@ -267,11 +298,25 @@ class VideoReencoder:
                 
                 # Extract relevant information
                 video_codec = title_info.get('VideoCodec', 'unknown')
-                width = title_info.get('Geometry', {}).get('Width', 0)
-                height = title_info.get('Geometry', {}).get('Height', 0)
-                fps_num = title_info.get('FrameRate', {}).get('Num', 30)
-                fps_den = title_info.get('FrameRate', {}).get('Den', 1)
+                
+                # Try multiple possible locations for geometry data
+                geometry = title_info.get('Geometry', {})
+                width = geometry.get('Width', 0)
+                height = geometry.get('Height', 0)
+                
+                # If geometry is empty, try PAR (Pixel Aspect Ratio) which also contains dimensions
+                if width == 0 or height == 0:
+                    width = title_info.get('Width', 0)
+                    height = title_info.get('Height', 0)
+                
+                # Get framerate
+                framerate = title_info.get('FrameRate', {})
+                fps_num = framerate.get('Num', 30)
+                fps_den = framerate.get('Den', 1)
                 fps = round(fps_num / fps_den) if fps_den > 0 else 30
+                
+                # Log what we found for debugging
+                self.logger.debug(f"Extracted: width={width}, height={height}, fps={fps}, codec={video_codec}")
                 
                 return {
                     'codec': video_codec,
@@ -436,6 +481,11 @@ class VideoReencoder:
             self.logger.info("Starting reencoding...")
             self.logger.info(f"Command: {' '.join(cmd)}")
             
+            # Prevent system sleep during encoding
+            sleep_prevented = prevent_sleep()
+            if sleep_prevented:
+                self.logger.info("Sleep prevention enabled during encoding")
+            
             # Run HandBrake with real-time progress
             process = subprocess.Popen(
                 cmd,
@@ -460,11 +510,19 @@ class VideoReencoder:
             print()  # New line after progress
             process.wait()
             
+            # Re-allow system sleep
+            if sleep_prevented:
+                allow_sleep()
+                self.logger.debug("Sleep prevention disabled")
+            
             if process.returncode != 0:
                 self.logger.error(f"HandBrake failed with return code {process.returncode}")
                 if output_path.exists():
                     output_path.unlink()
                 self.stats['failed'] += 1
+                # Make sure to re-allow sleep on error
+                if sleep_prevented:
+                    allow_sleep()
                 return False
             
             # Check if output file was created
@@ -514,6 +572,8 @@ class VideoReencoder:
         except Exception as e:
             self.logger.error(f"Error reencoding {video_path.name}: {e}")
             self.stats['failed'] += 1
+            # Re-allow system sleep on exception
+            allow_sleep()
             # Clean up temp file if it exists
             output_path = video_path.parent / f"{video_path.stem}_temp.mkv"
             if output_path.exists():

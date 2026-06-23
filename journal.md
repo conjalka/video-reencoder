@@ -1,3 +1,23 @@
+## 2024-06-23: Filename Bug Fix and Sleep Prevention
+
+### Issue: Incorrect Resolution in Filename
+- **Problem**: Output filename showed "0p30" instead of "1080p30" 
+- **Root Cause**: HandBrake's JSON structure has video dimensions in multiple possible locations
+- **Solution**: Added fallback logic to check both `Geometry.Width/Height` and direct `Width/Height` fields
+- **Added**: Debug logging to track extracted dimensions
+
+### Enhancement: Sleep Prevention
+- **Problem**: Long encoding sessions could be interrupted if computer goes to sleep
+- **Solution**: Added Windows sleep prevention using `ctypes.windll.kernel32.SetThreadExecutionState`
+- **Implementation**: 
+  - Prevents sleep at start of encoding
+  - Re-enables sleep after encoding completes
+  - Handles both success and error cases
+  - Only active on Windows platform
+- **User Impact**: Computer will stay awake during video processing, preventing interrupted encodes
+
+---
+
 # Video Reencoding Project - Development Journal
 
 ## Project Overview
