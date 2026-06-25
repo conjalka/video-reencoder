@@ -196,9 +196,13 @@ class VideoReencoder:
     
     def _is_already_encoded(self, filename: str) -> bool:
         """Check if filename indicates it's already HEVC encoded"""
-        # Pattern: [resolution fps HEVC]
-        hevc_pattern = r'\[.*HEVC\]'
-        return bool(re.search(hevc_pattern, filename, re.IGNORECASE))
+        # Old bracket style: [1080p30 HEVC]
+        if re.search(r'\[.*HEVC\]', filename, re.IGNORECASE):
+            return True
+        # New dash style: - x265 (with optional audio codec after)
+        if re.search(r'\bx265\b', filename, re.IGNORECASE):
+            return True
+        return False
     
     def _backup_file(self, file_path: Path) -> bool:
         """Backup file before deletion"""
@@ -329,14 +333,43 @@ class VideoReencoder:
                 fps_den = framerate.get('Den', 1)
                 fps = round(fps_num / fps_den) if fps_den > 0 else 30
                 
+                # Extract audio codec from first audio track
+                audio_codec = 'unknown'
+                audio_list = title_info.get('AudioList', [])
+                if audio_list:
+                    raw_audio = audio_list[0].get('CodecName', '') or audio_list[0].get('Codec', '')
+                    # Normalise to common short names used in filenames
+                    raw_lower = raw_audio.lower()
+                    if 'truehd' in raw_lower:
+                        audio_codec = 'TrueHD'
+                    elif 'dts-hd' in raw_lower or 'dts_hd' in raw_lower:
+                        audio_codec = 'DTS-HD'
+                    elif 'dts' in raw_lower:
+                        audio_codec = 'DTS'
+                    elif 'eac3' in raw_lower or 'e-ac-3' in raw_lower or 'e ac3' in raw_lower:
+                        audio_codec = 'EAC3'
+                    elif 'ac3' in raw_lower or 'ac-3' in raw_lower:
+                        audio_codec = 'AC3'
+                    elif 'aac' in raw_lower:
+                        audio_codec = 'AAC'
+                    elif 'mp3' in raw_lower:
+                        audio_codec = 'MP3'
+                    elif 'flac' in raw_lower:
+                        audio_codec = 'FLAC'
+                    elif 'pcm' in raw_lower or 'lpcm' in raw_lower:
+                        audio_codec = 'LPCM'
+                    elif raw_audio:
+                        audio_codec = raw_audio.upper()
+                
                 # Log what we found for debugging
-                self.logger.debug(f"Extracted: width={width}, height={height}, fps={fps}, codec={video_codec}")
+                self.logger.debug(f"Extracted: width={width}, height={height}, fps={fps}, codec={video_codec}, audio={audio_codec}")
                 
                 return {
                     'codec': video_codec,
                     'width': width,
                     'height': height,
                     'fps': fps,
+                    'audio_codec': audio_codec,
                     'is_hevc': 'hevc' in video_codec.lower() or 'h265' in video_codec.lower() or 'h.265' in video_codec.lower()
                 }
             except (json.JSONDecodeError, KeyError, IndexError) as e:
@@ -380,6 +413,83 @@ class VideoReencoder:
         else:
             return "H.265 MKV 480p30"
     
+    def _build_output_filename(self, stem: str, video_info: Dict) -> str:
+        """Build the output filename stem using the naming convention.
+
+        Rules:
+        - Strip any old bracket-style suffix: [1080p30 HEVC]
+        - Strip existing codec/resolution/audio tags in dash-separated segments
+          so we can replace them with accurate detected values.
+        - Preserve source tag (Bluray, WEBRip, HDTV, etc.) if present.
+        - Append: - <source-if-present><resolution> - x265 <audio>
+          e.g. "Movie (2020) - Bluray-1080p - x265 AC3"
+               "Show - S01E01 - Title - 720p - x265 AAC"
+        """
+        # --- 1. Remove old bracket-style suffix ---
+        stem = re.sub(r'\s*\[.*?HEVC\]', '', stem, flags=re.IGNORECASE).rstrip()
+
+        # --- 2. Split into dash-separated segments and strip codec/resolution/audio ---
+        # Patterns to recognise and remove from trailing segments
+        VIDEO_CODEC_PAT  = re.compile(r'\bx26[45]\b|\bh\.?26[45]\b|\bxvid\b|\bdivx\b|\bmpeg[24]?\b|\bvc-?1\b|\bvp[89]\b|\bav1\b', re.IGNORECASE)
+        AUDIO_CODEC_PAT  = re.compile(r'\b(truehd|dts[-_]?hd|dts|eac3|e[-\s]ac[-\s]?3|ac3|aac|mp3|flac|lpcm|pcm)\b', re.IGNORECASE)
+        RESOLUTION_PAT   = re.compile(r'\b\d{3,4}p\b', re.IGNORECASE)
+        # Source tags — keep the text but we'll rebuild the segment
+        SOURCE_PAT       = re.compile(r'\b(bluray|blu-ray|bdrip|brrip|webrip|web-dl|webdl|web|hdtv|dvdrip|dvd|hdrip|remux|uhd)\b', re.IGNORECASE)
+
+        segments = [s.strip() for s in stem.split(' - ')]
+
+        # Walk from the end, dropping segments that are purely codec/resolution/audio info
+        # Stop as soon as we hit a segment that looks like meaningful title content
+        clean_segments = list(segments)
+        while clean_segments:
+            last = clean_segments[-1]
+            # A segment is a "tag-only" segment if, after removing known tags, nothing meaningful remains
+            stripped = VIDEO_CODEC_PAT.sub('', last)
+            stripped = AUDIO_CODEC_PAT.sub('', stripped)
+            stripped = RESOLUTION_PAT.sub('', stripped)
+            stripped = SOURCE_PAT.sub('', stripped)
+            stripped = re.sub(r'[-\s]', '', stripped).strip()
+            if stripped == '':
+                clean_segments.pop()
+            else:
+                break
+
+        # --- 3. Determine source prefix for resolution segment ---
+        # Look for a source tag in the last remaining segment or the one we just dropped
+        source_prefix = ''
+        # Check all original segments for a source tag
+        for seg in segments:
+            m = SOURCE_PAT.search(seg)
+            if m:
+                # Normalise capitalisation
+                src_map = {
+                    'bluray': 'Bluray', 'blu-ray': 'Blu-ray',
+                    'bdrip': 'BDRip',   'brrip': 'BRRip',
+                    'webrip': 'WEBRip', 'web-dl': 'WEB-DL',
+                    'webdl': 'WEB-DL',  'web': 'WEB',
+                    'hdtv': 'HDTV',     'dvdrip': 'DVDRip',
+                    'dvd': 'DVD',       'hdrip': 'HDRip',
+                    'remux': 'Remux',   'uhd': 'UHD',
+                }
+                source_prefix = src_map.get(m.group(0).lower(), m.group(0)) + '-'
+                break
+
+        # --- 4. Build resolution string from actual detected height ---
+        resolution = f"{video_info['height']}p" if video_info['height'] > 0 else ''
+        audio = video_info.get('audio_codec', 'unknown')
+
+        # --- 5. Reassemble ---
+        base = ' - '.join(clean_segments)
+        res_seg = f"{source_prefix}{resolution}" if resolution else ''
+        codec_seg = f"x265 {audio}" if audio and audio != 'unknown' else 'x265'
+
+        parts = [base]
+        if res_seg:
+            parts.append(res_seg)
+        parts.append(codec_seg)
+
+        return ' - '.join(parts)
+
     def find_video_files(self) -> List[Path]:
         """Recursively find all video files in source directory"""
         self.logger.info(f"Scanning for video files in: {self.source_dir}")
@@ -564,12 +674,9 @@ class VideoReencoder:
             # Delete original
             video_path.unlink()
             
-            # Create new filename with encoding info
-            # Format: original_name [resolution fps HEVC].mkv
-            resolution = f"{video_info['height']}p"
-            fps = video_info['fps']
-            encoding_info = f"[{resolution}{fps} HEVC]"
-            final_path = video_path.parent / f"{video_path.stem} {encoding_info}.mkv"
+            # Build the new filename using the naming convention
+            new_stem = self._build_output_filename(video_path.stem, video_info)
+            final_path = video_path.parent / f"{new_stem}.mkv"
             output_path.rename(final_path)
             
             self.logger.info(f"Successfully reencoded: {final_path.name}")
