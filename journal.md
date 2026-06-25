@@ -1,3 +1,28 @@
+## 2026-06-23: New Filename Convention
+
+### Change: Output filenames now match existing library naming style
+- **Old format**: `3 Ninjas Kick Back (1994) - 1080p - x264 [1080p30 HEVC].mkv`
+- **New format**: `3 Ninjas Kick Back (1994) - 1080p - x265 AC3.mkv`
+- **With source**: `A Cinderella Story (2019) - Bluray-1080p - x265 AC3.mkv`
+- **TV show**: `A Discovery of Witches - S01E01 - Episode 1 - 480p - x265 AAC.mkv`
+
+### How `_build_output_filename()` works
+1. Strip any old `[*HEVC]` bracket suffix
+2. Split stem on ` - ` separators
+3. Walk segments from the end, dropping any segment that is **only** codec/resolution/audio/source tags (no meaningful title text)
+4. Scan all original segments for a source tag (Bluray, WEBRip, HDTV, etc.) — preserved as prefix on the resolution segment
+5. Append ` - <source><resolution>` (e.g. `Bluray-1080p`) then ` - x265 <audio>` using actual HandBrake-detected values
+
+### Audio codec detection added to `get_video_info()`
+- Reads `AudioList[0].CodecName` from the HandBrake scan JSON
+- Normalises to short filename-friendly names: AAC, AC3, DTS, DTS-HD, TrueHD, EAC3, MP3, FLAC, LPCM
+
+### `_is_already_encoded()` updated
+- Now recognises both old `[*HEVC]` bracket style **and** new `x265` in filename
+- Prevents re-encoding files already converted with the new convention
+
+---
+
 ## 2026-06-23: Filename Bug Fix (Second Fix) and HEVC Detection Fix
 
 ### Issue: Incorrect Resolution in Filename — `[0p30 HEVC]` still appearing
