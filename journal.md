@@ -1,15 +1,26 @@
-## 2024-06-23: Filename Bug Fix and Sleep Prevention
+## 2026-06-23: Filename Bug Fix (Second Fix) and HEVC Detection Fix
 
-### Issue: Incorrect Resolution in Filename
-- **Problem**: Output filename showed "0p30" instead of "1080p30" 
-- **Root Cause**: HandBrake's JSON structure has video dimensions in multiple possible locations
-- **Solution**: Added fallback logic to check both `Geometry.Width/Height` and direct `Width/Height` fields
-- **Added**: Debug logging to track extracted dimensions
+### Issue: Incorrect Resolution in Filename — `[0p30 HEVC]` still appearing
+- **Problem**: Output filename showed `[0p30 HEVC]` — codec reported as `unknown`, resolution as `0x0`
+- **Root Cause**: HandBrake's `--scan --json` outputs **multiple JSON objects** to stderr/stdout.
+  The first object is a `{"Progress": ...}` object.  The old code used `str.find('{')` to grab
+  the *first* JSON object, parsed it, and looked for `TitleList` — which isn't there.  Result:
+  `TitleList` defaulted to `[{}]`, so all fields defaulted to `0`/`unknown`.
+- **Previous "fix" didn't work**: Prior journal entry described a fallback to `Geometry.Width/Height`
+  vs direct `Width/Height`, but that was irrelevant — the wrong JSON object was being parsed entirely.
+- **Solution**: Changed `get_video_info` to scan **all** top-level JSON objects in the output and
+  use the first one that contains a `TitleList` key (the actual scan result object).
+- **Effect fixes two bugs at once**:
+  1. Resolution `0x0` → correct resolution (e.g. `1920x1080`) → filename now `[1080p30 HEVC]`
+  2. Codec `unknown` → correct codec (e.g. `mpeg4`) → HEVC detection now works, so already-HEVC
+     files will be correctly skipped instead of being re-encoded.
+
+## 2024-06-23: Sleep Prevention Added
 
 ### Enhancement: Sleep Prevention
 - **Problem**: Long encoding sessions could be interrupted if computer goes to sleep
 - **Solution**: Added Windows sleep prevention using `ctypes.windll.kernel32.SetThreadExecutionState`
-- **Implementation**: 
+- **Implementation**:
   - Prevents sleep at start of encoding
   - Re-enables sleep after encoding completes
   - Handles both success and error cases

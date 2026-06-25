@@ -264,36 +264,50 @@ class VideoReencoder:
                 # Try both, preferring stdout first
                 output_to_check = result.stdout if result.stdout.strip() else result.stderr
                 
-                # Find the first complete JSON object (starts with { and ends with })
-                # HandBrake may output multiple JSON objects or extra data
-                json_start = output_to_check.find('{')
+                # HandBrake emits multiple JSON objects (e.g. a "Progress" object followed
+                # by a "Version"/"TitleList" object).  Scan all top-level objects and use
+                # the one that contains "TitleList".
+                json_data = None
+                search_pos = 0
+                while search_pos < len(output_to_check):
+                    json_start = output_to_check.find('{', search_pos)
+                    if json_start == -1:
+                        break
+                    
+                    # Walk forward counting braces to find the matching closing brace
+                    brace_count = 0
+                    json_end = json_start
+                    for i in range(json_start, len(output_to_check)):
+                        if output_to_check[i] == '{':
+                            brace_count += 1
+                        elif output_to_check[i] == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                json_end = i
+                                break
+                    
+                    if brace_count != 0:
+                        # Incomplete object — stop searching
+                        break
+                    
+                    json_str = output_to_check[json_start:json_end + 1]
+                    try:
+                        candidate = json.loads(json_str)
+                        if 'TitleList' in candidate:
+                            json_data = candidate
+                            break
+                    except json.JSONDecodeError:
+                        pass
+                    
+                    search_pos = json_end + 1
                 
-                if json_start == -1:
-                    self.logger.warning(f"No JSON found in HandBrake output for {video_path.name}")
+                if json_data is None:
+                    self.logger.warning(f"No TitleList JSON found in HandBrake output for {video_path.name}")
                     self.logger.debug(f"HandBrake stdout (first 500 chars): {result.stdout[:500]}")
                     self.logger.debug(f"HandBrake stderr (first 500 chars): {result.stderr[:500]}")
                     self.logger.debug(f"HandBrake return code: {result.returncode}")
                     return None
                 
-                # Find the matching closing brace for the first JSON object
-                # Count braces to handle nested objects
-                brace_count = 0
-                json_end = json_start
-                for i in range(json_start, len(output_to_check)):
-                    if output_to_check[i] == '{':
-                        brace_count += 1
-                    elif output_to_check[i] == '}':
-                        brace_count -= 1
-                        if brace_count == 0:
-                            json_end = i
-                            break
-                
-                if brace_count != 0:
-                    self.logger.warning(f"Incomplete JSON in HandBrake output for {video_path.name}")
-                    return None
-                
-                json_str = output_to_check[json_start:json_end + 1]
-                json_data = json.loads(json_str)
                 title_info = json_data.get('TitleList', [{}])[0]
                 
                 # Extract relevant information
