@@ -266,7 +266,10 @@ class VideoReencoder:
             try:
                 # HandBrake may output JSON in either stdout or stderr
                 # Try both, preferring stdout first
-                output_to_check = result.stdout if result.stdout.strip() else result.stderr
+                # Guard against None (can happen on network share hiccups)
+                stdout = result.stdout or ''
+                stderr = result.stderr or ''
+                output_to_check = stdout if stdout.strip() else stderr
                 
                 # HandBrake emits multiple JSON objects (e.g. a "Progress" object followed
                 # by a "Version"/"TitleList" object).  Scan all top-level objects and use
