@@ -130,16 +130,16 @@ class VideoReencoder:
         }
         self.stats_lock = multiprocessing.Lock() if parallel > 1 else None
         
-        # Load state if resuming
-        if self.resume:
-            self._load_state()
+        # Setup logging first so all subsequent calls can use self.logger
+        self._setup_logging()
         
         # Setup backup directory
         if self.backup_dir:
             self.backup_dir.mkdir(parents=True, exist_ok=True)
         
-        # Setup logging
-        self._setup_logging()
+        # Load state if resuming
+        if self.resume:
+            self._load_state()
         
     def _setup_logging(self):
         """Configure logging to both file and console"""
