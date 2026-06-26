@@ -4,6 +4,8 @@ Video Reencoding Script
 Automatically converts video files to HEVC/H.265 format using HandBrake
 """
 
+__version__ = "0.1"
+
 import os
 import sys
 import json
@@ -231,7 +233,7 @@ class VideoReencoder:
             ]
         )
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"Video Reencoder started - Log file: {log_path}")
+        self.logger.info(f"Video Reencoder v{__version__} started - Log file: {log_path}")
         self.logger.info(f"Source directory: {self.source_dir}")
         self.logger.info(f"Encoder: {self.encoder} ({self.gpu_encoder})")
         if self.gpu_encoder != 'none':
@@ -995,6 +997,10 @@ Examples:
         """
     )
     
+    parser.add_argument(
+        '--version', action='version', version=f'%(prog)s {__version__}'
+    )
+
     parser.add_argument(
         'source_dir',
         help='Source directory containing video files to reencode'
