@@ -325,11 +325,11 @@ class VideoReencoder:
                 [self.handbrake_path, "--scan", "--json", "-i", str(video_path)],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=300  # Large files over network can take a while to scan
             )
             
             if result.returncode != 0:
-                self.logger.warning(f"Failed to scan {video_path.name}")
+                self.logger.warning(f"Failed to scan {video_path.name}: return code {result.returncode}")
                 return None
             
             # Parse JSON output
@@ -381,6 +381,7 @@ class VideoReencoder:
                 if json_data is None:
                     self.logger.warning(f"No TitleList JSON found in HandBrake output for {video_path.name}")
                     self.logger.warning(f"HandBrake return code: {result.returncode}")
+                    self.logger.warning(f"  stdout length: {len(stdout)}  stderr length: {len(stderr)}")
                     # Log the top-level keys of every JSON object we found (helps diagnose
                     # structural differences in HandBrake output across versions/file types)
                     search_pos2 = 0
@@ -410,8 +411,7 @@ class VideoReencoder:
                         search_pos2 = j_end + 1
                     if obj_num == 0:
                         self.logger.warning(f"  No valid JSON objects found at all")
-                        self.logger.warning(f"  stdout (first 300): {stdout[:300]}")
-                        self.logger.warning(f"  stderr (first 300): {stderr[:300]}")
+                        self.logger.warning(f"  stderr last 500 chars: {stderr[-500:]}")
                     return None
                 
                 title_info = json_data.get('TitleList', [{}])[0]
