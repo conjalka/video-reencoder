@@ -380,9 +380,38 @@ class VideoReencoder:
                 
                 if json_data is None:
                     self.logger.warning(f"No TitleList JSON found in HandBrake output for {video_path.name}")
-                    self.logger.debug(f"HandBrake stdout (first 500 chars): {result.stdout[:500]}")
-                    self.logger.debug(f"HandBrake stderr (first 500 chars): {result.stderr[:500]}")
-                    self.logger.debug(f"HandBrake return code: {result.returncode}")
+                    self.logger.warning(f"HandBrake return code: {result.returncode}")
+                    # Log the top-level keys of every JSON object we found (helps diagnose
+                    # structural differences in HandBrake output across versions/file types)
+                    search_pos2 = 0
+                    obj_num = 0
+                    while search_pos2 < len(output_to_check):
+                        j_start = output_to_check.find('{', search_pos2)
+                        if j_start == -1:
+                            break
+                        bc = 0
+                        j_end = j_start
+                        for i in range(j_start, len(output_to_check)):
+                            if output_to_check[i] == '{':
+                                bc += 1
+                            elif output_to_check[i] == '}':
+                                bc -= 1
+                                if bc == 0:
+                                    j_end = i
+                                    break
+                        if bc != 0:
+                            break
+                        try:
+                            obj = json.loads(output_to_check[j_start:j_end + 1])
+                            obj_num += 1
+                            self.logger.warning(f"  JSON object {obj_num} top-level keys: {list(obj.keys())}")
+                        except json.JSONDecodeError:
+                            pass
+                        search_pos2 = j_end + 1
+                    if obj_num == 0:
+                        self.logger.warning(f"  No valid JSON objects found at all")
+                        self.logger.warning(f"  stdout (first 300): {stdout[:300]}")
+                        self.logger.warning(f"  stderr (first 300): {stderr[:300]}")
                     return None
                 
                 title_info = json_data.get('TitleList', [{}])[0]
