@@ -378,6 +378,8 @@ class VideoReencoder:
                 [self.handbrake_path, "--scan", "--json", "-i", str(video_path)],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=300  # Large files over network can take a while to scan
             )
             
@@ -720,8 +722,9 @@ class VideoReencoder:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 bufsize=1,
-                universal_newlines=True
             )
 
             # Reset pause state for this file
