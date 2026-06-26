@@ -535,11 +535,15 @@ class VideoReencoder:
             size /= 1024.0
         return f"{size:.2f} PB"
     
-    def reencode_video(self, video_path: Path) -> bool:
+    def reencode_video(self, video_path: Path,
+                       file_index: int = 0, total_files: int = 0) -> bool:
         """Reencode a single video file to HEVC"""
         try:
             self.logger.info(f"\n{'='*80}")
-            self.logger.info(f"Processing: {video_path}")
+            if file_index and total_files:
+                self.logger.info(f"Processing file {file_index} of {total_files}: {video_path}")
+            else:
+                self.logger.info(f"Processing: {video_path}")
             
             # Get video information
             video_info = self.get_video_info(video_path)
@@ -624,13 +628,19 @@ class VideoReencoder:
             )
             
             # Monitor progress
+            # Build a queue-position prefix to show alongside HandBrake's own progress
+            if file_index and total_files:
+                progress_prefix = f"[{file_index}/{total_files}] "
+            else:
+                progress_prefix = ""
+
             if process.stdout:
                 for line in process.stdout:
                     line = line.strip()
                     if line:
                         # HandBrake progress lines contain "Encoding:"
                         if "Encoding:" in line or "%" in line:
-                            print(f"\r{line}", end='', flush=True)
+                            print(f"\r{progress_prefix}{line}", end='', flush=True)
                         else:
                             self.logger.debug(line)
             
@@ -753,9 +763,7 @@ class VideoReencoder:
             video_iterator = video_files
         
         for idx, video_path in enumerate(video_iterator, 1):
-            if not TQDM_AVAILABLE:
-                self.logger.info(f"\n[{idx}/{len(video_files)}] Processing file {idx} of {len(video_files)}")
-            self.reencode_video(video_path)
+            self.reencode_video(video_path, file_index=idx, total_files=len(video_files))
     
     def _process_parallel(self, video_files: List[Path]):
         """Process multiple files in parallel"""
