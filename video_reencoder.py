@@ -317,6 +317,59 @@ class VideoReencoder:
             self.logger.error(f"Error checking HandBrakeCLI: {e}")
             return False
     
+    def _normalise_audio_codec(self, raw: str) -> str:
+        """Normalise a raw audio codec string to a short filename-friendly label."""
+        r = raw.lower()
+        if 'truehd' in r:           return 'TrueHD'
+        if 'dts-hd' in r or 'dts_hd' in r: return 'DTS-HD'
+        if 'dts' in r:              return 'DTS'
+        if 'eac3' in r or 'e-ac' in r: return 'EAC3'
+        if 'ac3' in r or 'ac-3' in r:  return 'AC3'
+        if 'aac' in r:              return 'AAC'
+        if 'mp3' in r:              return 'MP3'
+        if 'flac' in r:             return 'FLAC'
+        if 'pcm' in r or 'lpcm' in r: return 'LPCM'
+        return raw.upper() if raw else 'unknown'
+
+    def _parse_info_from_stderr(self, stderr: str) -> Optional[Dict]:
+        """
+        Fallback: parse video properties from HandBrake's plain-text stderr.
+        Used when some HandBrake builds suppress --json output when stdout is piped.
+
+        Relevant log lines that HandBrake always writes:
+          scan: 10 previews, 1920x1080, 23.976 fps, ...
+          scan: audio 0x1: eac3, rate=48000Hz, ...
+        """
+        m = re.search(r'scan:.*?(\d{3,4})x(\d{3,4}),\s*([\d.]+)\s*fps', stderr)
+        if not m:
+            return None
+        width  = int(m.group(1))
+        height = int(m.group(2))
+        fps    = round(float(m.group(3)))
+
+        # Video codec — try a few patterns HandBrake may use
+        video_codec = 'unknown'
+        for pat in [
+            r'\+ video track.*?codec[:\s]+(\S+)',
+            r'scan:.*?video codec[:\s]+(\S+)',
+            r'\b(h264|h265|hevc|mpeg4|mpeg2|vp8|vp9|av1|vc1)\b',
+        ]:
+            mc = re.search(pat, stderr, re.IGNORECASE)
+            if mc:
+                video_codec = mc.group(1).lower()
+                break
+
+        # Audio codec from "scan: audio 0x1: eac3, ..."
+        audio_codec = 'unknown'
+        ma = re.search(r'scan:\s*audio[^:]*:\s*(\S+),', stderr, re.IGNORECASE)
+        if ma:
+            audio_codec = self._normalise_audio_codec(ma.group(1))
+
+        is_hevc = video_codec in ('hevc', 'h265', 'h.265')
+        self.logger.debug(f"Text fallback: {width}x{height} {fps}fps codec={video_codec} audio={audio_codec}")
+        return {'codec': video_codec, 'width': width, 'height': height,
+                'fps': fps, 'audio_codec': audio_codec, 'is_hevc': is_hevc}
+
     def get_video_info(self, video_path: Path) -> Optional[Dict]:
         """Extract video information using HandBrakeCLI"""
         try:
@@ -379,93 +432,33 @@ class VideoReencoder:
                     search_pos = json_end + 1
                 
                 if json_data is None:
-                    self.logger.warning(f"No TitleList JSON found in HandBrake output for {video_path.name}")
-                    self.logger.warning(f"HandBrake return code: {result.returncode}")
-                    self.logger.warning(f"  stdout length: {len(stdout)}  stderr length: {len(stderr)}")
-                    # Log the top-level keys of every JSON object we found (helps diagnose
-                    # structural differences in HandBrake output across versions/file types)
-                    search_pos2 = 0
-                    obj_num = 0
-                    while search_pos2 < len(output_to_check):
-                        j_start = output_to_check.find('{', search_pos2)
-                        if j_start == -1:
-                            break
-                        bc = 0
-                        j_end = j_start
-                        for i in range(j_start, len(output_to_check)):
-                            if output_to_check[i] == '{':
-                                bc += 1
-                            elif output_to_check[i] == '}':
-                                bc -= 1
-                                if bc == 0:
-                                    j_end = i
-                                    break
-                        if bc != 0:
-                            break
-                        try:
-                            obj = json.loads(output_to_check[j_start:j_end + 1])
-                            obj_num += 1
-                            self.logger.warning(f"  JSON object {obj_num} top-level keys: {list(obj.keys())}")
-                        except json.JSONDecodeError:
-                            pass
-                        search_pos2 = j_end + 1
-                    if obj_num == 0:
-                        self.logger.warning(f"  No valid JSON objects found at all")
-                        self.logger.warning(f"  stderr last 500 chars: {stderr[-500:]}")
-                    return None
-                
+                    # JSON not found — fall back to parsing plain-text stderr
+                    self.logger.debug(f"JSON not found for {video_path.name}, trying text fallback")
+                    info = self._parse_info_from_stderr(stderr)
+                    if info is None:
+                        self.logger.warning(f"Could not extract video info from HandBrake output for {video_path.name}")
+                        return None
+                    return info
+
+                # JSON path succeeded — extract from TitleList
                 title_info = json_data.get('TitleList', [{}])[0]
-                
-                # Extract relevant information
                 video_codec = title_info.get('VideoCodec', 'unknown')
-                
-                # Try multiple possible locations for geometry data
                 geometry = title_info.get('Geometry', {})
-                width = geometry.get('Width', 0)
+                width  = geometry.get('Width', 0)
                 height = geometry.get('Height', 0)
-                
-                # If geometry is empty, try PAR (Pixel Aspect Ratio) which also contains dimensions
                 if width == 0 or height == 0:
-                    width = title_info.get('Width', 0)
+                    width  = title_info.get('Width', 0)
                     height = title_info.get('Height', 0)
-                
-                # Get framerate
                 framerate = title_info.get('FrameRate', {})
                 fps_num = framerate.get('Num', 30)
                 fps_den = framerate.get('Den', 1)
                 fps = round(fps_num / fps_den) if fps_den > 0 else 30
-                
-                # Extract audio codec from first audio track
                 audio_codec = 'unknown'
                 audio_list = title_info.get('AudioList', [])
                 if audio_list:
                     raw_audio = audio_list[0].get('CodecName', '') or audio_list[0].get('Codec', '')
-                    # Normalise to common short names used in filenames
-                    raw_lower = raw_audio.lower()
-                    if 'truehd' in raw_lower:
-                        audio_codec = 'TrueHD'
-                    elif 'dts-hd' in raw_lower or 'dts_hd' in raw_lower:
-                        audio_codec = 'DTS-HD'
-                    elif 'dts' in raw_lower:
-                        audio_codec = 'DTS'
-                    elif 'eac3' in raw_lower or 'e-ac-3' in raw_lower or 'e ac3' in raw_lower:
-                        audio_codec = 'EAC3'
-                    elif 'ac3' in raw_lower or 'ac-3' in raw_lower:
-                        audio_codec = 'AC3'
-                    elif 'aac' in raw_lower:
-                        audio_codec = 'AAC'
-                    elif 'mp3' in raw_lower:
-                        audio_codec = 'MP3'
-                    elif 'flac' in raw_lower:
-                        audio_codec = 'FLAC'
-                    elif 'pcm' in raw_lower or 'lpcm' in raw_lower:
-                        audio_codec = 'LPCM'
-                    elif raw_audio:
-                        audio_codec = raw_audio.upper()
-                
-                # Log what we found for debugging
-                self.logger.debug(f"Extracted: width={width}, height={height}, fps={fps}, codec={video_codec}, audio={audio_codec}")
-                
+                    audio_codec = self._normalise_audio_codec(raw_audio)
+                self.logger.debug(f"JSON: {width}x{height} {fps}fps codec={video_codec} audio={audio_codec}")
                 return {
                     'codec': video_codec,
                     'width': width,
@@ -477,7 +470,7 @@ class VideoReencoder:
             except (json.JSONDecodeError, KeyError, IndexError) as e:
                 self.logger.warning(f"Failed to parse video info for {video_path.name}: {e}")
                 return None
-                
+
         except subprocess.TimeoutExpired:
             self.logger.warning(f"Timeout scanning {video_path.name}")
             return None
