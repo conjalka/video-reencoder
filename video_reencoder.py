@@ -13,6 +13,7 @@ import argparse
 import re
 import shutil
 import multiprocessing
+import threading
 import ctypes
 from pathlib import Path
 from datetime import datetime
@@ -99,6 +100,72 @@ def allow_sleep():
     return False
 
 
+def _suspend_process(pid: int):
+    """Suspend all threads of a process (Windows only)"""
+    if sys.platform != 'win32':
+        return
+    THREAD_SUSPEND_RESUME = 0x0002
+    kernel32 = ctypes.windll.kernel32
+    h_snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, pid)  # TH32CS_SNAPTHREAD
+    if h_snapshot == ctypes.c_void_p(-1).value:
+        return
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ('dwSize',             ctypes.c_ulong),
+            ('cntUsage',           ctypes.c_ulong),
+            ('th32ThreadID',       ctypes.c_ulong),
+            ('th32OwnerProcessID', ctypes.c_ulong),
+            ('tpBasePri',          ctypes.c_long),
+            ('tpDeltaPri',         ctypes.c_long),
+            ('dwFlags',            ctypes.c_ulong),
+        ]
+    te = THREADENTRY32()
+    te.dwSize = ctypes.sizeof(THREADENTRY32)
+    if kernel32.Thread32First(h_snapshot, ctypes.byref(te)):
+        while True:
+            if te.th32OwnerProcessID == pid:
+                h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                if h_thread:
+                    kernel32.SuspendThread(h_thread)
+                    kernel32.CloseHandle(h_thread)
+            if not kernel32.Thread32Next(h_snapshot, ctypes.byref(te)):
+                break
+    kernel32.CloseHandle(h_snapshot)
+
+
+def _resume_process(pid: int):
+    """Resume all threads of a process (Windows only)"""
+    if sys.platform != 'win32':
+        return
+    THREAD_SUSPEND_RESUME = 0x0002
+    kernel32 = ctypes.windll.kernel32
+    h_snapshot = kernel32.CreateToolhelp32Snapshot(0x00000004, pid)
+    if h_snapshot == ctypes.c_void_p(-1).value:
+        return
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ('dwSize',             ctypes.c_ulong),
+            ('cntUsage',           ctypes.c_ulong),
+            ('th32ThreadID',       ctypes.c_ulong),
+            ('th32OwnerProcessID', ctypes.c_ulong),
+            ('tpBasePri',          ctypes.c_long),
+            ('tpDeltaPri',         ctypes.c_long),
+            ('dwFlags',            ctypes.c_ulong),
+        ]
+    te = THREADENTRY32()
+    te.dwSize = ctypes.sizeof(THREADENTRY32)
+    if kernel32.Thread32First(h_snapshot, ctypes.byref(te)):
+        while True:
+            if te.th32OwnerProcessID == pid:
+                h_thread = kernel32.OpenThread(THREAD_SUSPEND_RESUME, False, te.th32ThreadID)
+                if h_thread:
+                    kernel32.ResumeThread(h_thread)
+                    kernel32.CloseHandle(h_thread)
+            if not kernel32.Thread32Next(h_snapshot, ctypes.byref(te)):
+                break
+    kernel32.CloseHandle(h_snapshot)
+
+
 class VideoReencoder:
     """Main class for video reencoding operations"""
     
@@ -129,7 +196,10 @@ class VideoReencoder:
             'space_saved': 0
         }
         self.stats_lock = multiprocessing.Lock() if parallel > 1 else None
-        
+        # Pause / quit control (set by the key-listener thread during encoding)
+        self._paused = False
+        self.quit_after_current = False
+
         # Setup logging first so all subsequent calls can use self.logger
         self._setup_logging()
         
@@ -611,7 +681,12 @@ class VideoReencoder:
             
             self.logger.info("Starting reencoding...")
             self.logger.info(f"Command: {' '.join(cmd)}")
-            
+
+            # Print control instructions banner
+            print()
+            print("  Controls:  P = Pause    R = Resume    Q = Quit after this file")
+            print()
+
             # Prevent system sleep during encoding
             sleep_prevented = prevent_sleep()
             if sleep_prevented:
@@ -626,24 +701,63 @@ class VideoReencoder:
                 bufsize=1,
                 universal_newlines=True
             )
-            
-            # Monitor progress
+
+            # Reset pause state for this file
+            self._paused = False
+
             # Build a queue-position prefix to show alongside HandBrake's own progress
             if file_index and total_files:
                 progress_prefix = f"[{file_index}/{total_files}] "
             else:
                 progress_prefix = ""
 
+            # Key-listener thread — watches for P / R / Q while HandBrake runs
+            stop_listener = threading.Event()
+            last_progress_line = ['']
+
+            def key_listener():
+                if sys.platform != 'win32':
+                    return
+                import msvcrt
+                while not stop_listener.is_set():
+                    if msvcrt.kbhit():
+                        key = msvcrt.getwch().upper()
+                        if key == 'P' and not self._paused:
+                            self._paused = True
+                            _suspend_process(process.pid)
+                            print()
+                            print("  *** PAUSED ***  Press R to resume or Q to quit after this file")
+                        elif key == 'R' and self._paused:
+                            self._paused = False
+                            _resume_process(process.pid)
+                            print(f"\r{progress_prefix}{last_progress_line[0]}", end='', flush=True)
+                        elif key == 'Q':
+                            self.quit_after_current = True
+                            if self._paused:
+                                # Resume so HandBrake can finish normally
+                                self._paused = False
+                                _resume_process(process.pid)
+                                print()
+                            print()
+                            print("  Quit requested — finishing current file then stopping...")
+                    threading.Event().wait(0.05)  # 50 ms poll
+
+            listener_thread = threading.Thread(target=key_listener, daemon=True)
+            listener_thread.start()
+
+            # Monitor progress
             if process.stdout:
                 for line in process.stdout:
                     line = line.strip()
                     if line:
-                        # HandBrake progress lines contain "Encoding:"
                         if "Encoding:" in line or "%" in line:
-                            print(f"\r{progress_prefix}{line}", end='', flush=True)
+                            if not self._paused:
+                                last_progress_line[0] = line
+                                print(f"\r{progress_prefix}{line}", end='', flush=True)
                         else:
                             self.logger.debug(line)
-            
+
+            stop_listener.set()
             print()  # New line after progress
             process.wait()
             
@@ -764,6 +878,9 @@ class VideoReencoder:
         
         for idx, video_path in enumerate(video_iterator, 1):
             self.reencode_video(video_path, file_index=idx, total_files=len(video_files))
+            if self.quit_after_current:
+                self.logger.info("Quit requested by user — stopping after current file.")
+                break
     
     def _process_parallel(self, video_files: List[Path]):
         """Process multiple files in parallel"""
