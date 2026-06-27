@@ -336,30 +336,40 @@ class VideoReencoder:
     def _parse_info_from_stderr(self, stderr: str) -> Optional[Dict]:
         """
         Fallback: parse video properties from HandBrake's plain-text stderr.
-        Used when some HandBrake builds suppress --json output when stdout is piped.
+        Used when HandBrake suppresses --json output, or when JSON TitleList is empty.
 
-        Relevant log lines that HandBrake always writes:
+        HandBrake emits lines like:
           scan: 10 previews, 1920x1080, 23.976 fps, ...
+          + codec: avc
           scan: audio 0x1: eac3, rate=48000Hz, ...
         """
-        m = re.search(r'scan:.*?(\d{3,4})x(\d{3,4}),\s*([\d.]+)\s*fps', stderr)
+        # Resolution + fps — allow optional space around 'x', optional comma before fps
+        m = re.search(r'(\d{3,4})\s*[xX]\s*(\d{3,4})[, ]+\s*([\d.]+)\s*fps', stderr)
         if not m:
             return None
         width  = int(m.group(1))
         height = int(m.group(2))
         fps    = round(float(m.group(3)))
 
-        # Video codec — try a few patterns HandBrake may use
+        # Video codec — HandBrake may say "avc", "avc1", "h264", "hevc", "mpeg4", etc.
         video_codec = 'unknown'
         for pat in [
+            r'\+\s*codec:\s*(\S+)',                              # "+ codec: avc"
             r'\+ video track.*?codec[:\s]+(\S+)',
             r'scan:.*?video codec[:\s]+(\S+)',
-            r'\b(h264|h265|hevc|mpeg4|mpeg2|vp8|vp9|av1|vc1)\b',
+            r'\b(hevc|h265|h\.265|avc1?|h264|h\.264|mpeg4|mpeg2|vp[89]|av1|vc-?1)\b',
         ]:
             mc = re.search(pat, stderr, re.IGNORECASE)
             if mc:
                 video_codec = mc.group(1).lower()
                 break
+
+        # Normalise codec aliases to canonical names
+        _codec_alias = {
+            'avc': 'h264', 'avc1': 'h264',
+            'h.264': 'h264', 'h.265': 'hevc', 'h265': 'hevc',
+        }
+        video_codec = _codec_alias.get(video_codec, video_codec)
 
         # Audio codec from "scan: audio 0x1: eac3, ..."
         audio_codec = 'unknown'
@@ -367,7 +377,7 @@ class VideoReencoder:
         if ma:
             audio_codec = self._normalise_audio_codec(ma.group(1))
 
-        is_hevc = video_codec in ('hevc', 'h265', 'h.265')
+        is_hevc = video_codec in ('hevc',)
         self.logger.debug(f"Text fallback: {width}x{height} {fps}fps codec={video_codec} audio={audio_codec}")
         return {'codec': video_codec, 'width': width, 'height': height,
                 'fps': fps, 'audio_codec': audio_codec, 'is_hevc': is_hevc}
@@ -463,6 +473,23 @@ class VideoReencoder:
                     raw_audio = audio_list[0].get('CodecName', '') or audio_list[0].get('Codec', '')
                     audio_codec = self._normalise_audio_codec(raw_audio)
                 self.logger.debug(f"JSON: {width}x{height} {fps}fps codec={video_codec} audio={audio_codec}")
+
+                # If JSON returned zeros or unknown, the TitleList was likely empty
+                # (can happen when HandBrake scans over SMB).  Try text fallback to fill gaps.
+                if (width == 0 or height == 0 or video_codec == 'unknown') and stderr:
+                    self.logger.debug(f"JSON TitleList incomplete for {video_path.name}, trying text fallback to fill gaps")
+                    fallback = self._parse_info_from_stderr(stderr)
+                    if fallback:
+                        if width == 0 or height == 0:
+                            width  = fallback['width']
+                            height = fallback['height']
+                            fps    = fallback['fps']
+                        if video_codec == 'unknown':
+                            video_codec = fallback['codec']
+                        if audio_codec == 'unknown':
+                            audio_codec = fallback['audio_codec']
+                        self.logger.debug(f"After fallback merge: {width}x{height} {fps}fps codec={video_codec} audio={audio_codec}")
+
                 return {
                     'codec': video_codec,
                     'width': width,
@@ -574,7 +601,12 @@ class VideoReencoder:
                 break
 
         # --- 4. Build resolution string from actual detected height ---
-        resolution = f"{video_info['height']}p" if video_info['height'] > 0 else ''
+        # If scan failed to get height, try to read it from the original filename as a fallback
+        if video_info['height'] > 0:
+            resolution = f"{video_info['height']}p"
+        else:
+            fn_res = re.search(r'\b(\d{3,4}p)\b', stem, re.IGNORECASE)
+            resolution = fn_res.group(1).lower() if fn_res else ''
         audio = video_info.get('audio_codec', 'unknown')
 
         # --- 5. Reassemble ---
