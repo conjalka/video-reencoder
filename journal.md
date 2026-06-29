@@ -1,3 +1,34 @@
+## 2026-06-28: v0.3 — Charmap crash fix; skip when output is larger than input
+
+### Problems fixed
+
+1. **Charmap crash during encoding (E07 failure)** — `'charmap' codec can't encode character '\ufffd'`
+   - **Root cause**: Two places. The `logging.FileHandler` had no `encoding=` set, so on
+     Windows it opened the log file in the system's default `charmap` encoding. When a debug
+     line containing a `\ufffd` replacement character (from HandBrake output) was written to
+     the log, it crashed. Additionally `check_handbrake()`'s `subprocess.run` also lacked
+     `encoding='utf-8'`.
+   - **Fix**: Added `encoding='utf-8'` to `FileHandler` and both `encoding='utf-8',
+     errors='replace'` to the version-check `subprocess.run`.
+
+2. **Re-encoded files coming out larger (all 9 Band of Brothers episodes got bigger)**
+   - **Why it happened**: The source files were already efficient high-bitrate H.264 encodes
+     (Bluray source). x265 at CRF 23 targets a quality *floor*, not a size target — if the
+     source was encoded below that quality floor, x265 uses more bits to reach it.
+   - **Fix**: After encoding, compare new size to original. If `new_size >= original_size`,
+     delete the temp file, log a warning, and keep the original. The file is counted as
+     `skipped_larger` (new stat), shown in the summary as
+     `Skipped (x265 output larger than original): N`.
+   - **No data lost**: The original files that were already replaced before this fix are still
+     valid H.265 — just unnecessarily larger. They won't be re-processed (they have `x265` in
+     the filename so `_is_already_encoded()` skips them).
+
+### Git
+- Commit: `d3a56a0`
+- Tag: `v0.3`
+
+---
+
 ## 2026-06-23: v0.2 — Scan fallback fixes (codec/resolution detection)
 
 ### Problems fixed
