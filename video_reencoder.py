@@ -773,7 +773,9 @@ class VideoReencoder:
             else:
                 progress_prefix = ""
 
-            # Key-listener thread — watches for P / R / Q while HandBrake runs
+            # Key-listener thread — watches for P / R / Q while HandBrake runs.
+            # Uses blocking getwch() so keypresses are received even while the
+            # main thread is blocked reading HandBrake's stdout pipe.
             stop_listener = threading.Event()
             last_progress_line = ['']
 
@@ -782,27 +784,29 @@ class VideoReencoder:
                     return
                 import msvcrt
                 while not stop_listener.is_set():
-                    if msvcrt.kbhit():
-                        key = msvcrt.getwch().upper()
-                        if key == 'P' and not self._paused:
-                            self._paused = True
-                            _suspend_process(process.pid)
-                            print()
-                            print("  *** PAUSED ***  Press R to resume or Q to quit after this file")
-                        elif key == 'R' and self._paused:
+                    # getwch() blocks until a key is pressed — no polling needed.
+                    # The daemon flag ensures this thread dies when the main thread exits.
+                    key = msvcrt.getwch().upper()
+                    if stop_listener.is_set():
+                        break
+                    if key == 'P' and not self._paused:
+                        self._paused = True
+                        _suspend_process(process.pid)
+                        print()
+                        print("  *** PAUSED ***  Press R to resume or Q to quit after this file")
+                    elif key == 'R' and self._paused:
+                        self._paused = False
+                        _resume_process(process.pid)
+                        print(f"\r{progress_prefix}{last_progress_line[0]}", end='', flush=True)
+                    elif key == 'Q':
+                        self.quit_after_current = True
+                        if self._paused:
+                            # Resume so HandBrake can finish normally
                             self._paused = False
                             _resume_process(process.pid)
-                            print(f"\r{progress_prefix}{last_progress_line[0]}", end='', flush=True)
-                        elif key == 'Q':
-                            self.quit_after_current = True
-                            if self._paused:
-                                # Resume so HandBrake can finish normally
-                                self._paused = False
-                                _resume_process(process.pid)
-                                print()
                             print()
-                            print("  Quit requested — finishing current file then stopping...")
-                    threading.Event().wait(0.05)  # 50 ms poll
+                        print()
+                        print("  Quit requested — finishing current file then stopping...")
 
             listener_thread = threading.Thread(target=key_listener, daemon=True)
             listener_thread.start()
