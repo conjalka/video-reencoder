@@ -1,3 +1,41 @@
+## 2026-06-23: v0.2 — Scan fallback fixes (codec/resolution detection)
+
+### Problems fixed
+1. **`Codec: unknown` / `Resolution: 0x0` on SMB scans** — HandBrake's JSON path
+   found a valid `TitleList` object but it was an empty dict `{}`, so all fields
+   defaulted to `0`/`unknown`. This happened silently — no warning was logged.
+   Previously the text fallback only fired when **no** JSON with `TitleList` existed
+   at all. Fixed by also running the text fallback when JSON extraction yields
+   `width==0`, `height==0`, or `codec=='unknown'`, and merging just the missing fields.
+
+2. **`[0p30 HEVC]` in output filename** — Two-part fix:
+   - Root cause was Bug #1 above (`height=0` → `_build_output_filename` had no
+     height to format). Fixing Bug #1 gives HandBrake the real height.
+   - Added a second safety net: if `height` is still 0 after scan, extract
+     resolution from the original filename (e.g. `1080p` in `... - 1080p - x264.mp4`)
+     so the output name is still correct even on a total scan failure.
+
+3. **`_parse_info_from_stderr` improved** — Broadened patterns to match more
+   HandBrake output styles:
+   - Resolution regex now allows optional spaces around `x` and before `fps`
+   - Added `+ codec: avc` line pattern (the most common HandBrake output for H.264)
+   - Added `avc`/`avc1` to the codec word-boundary fallback regex
+   - Added normalisation alias table: `avc`→`h264`, `avc1`→`h264`, `h.264`→`h264`,
+     `h.265`→`hevc`, `h265`→`hevc` — ensures HEVC detection fires correctly
+
+### Result
+For the `3 Ninjas Kick Back (1994)` test case, the scan will now:
+- Detect codec (e.g. `h264`) and resolution (e.g. `1920x1080`) from stderr text
+- Output filename: `3 Ninjas Kick Back (1994) - 1080p - x265 AC3.mkv` (or with
+  source prefix if present)
+- Correctly identify already-HEVC files as `is_hevc=True` even if JSON is empty
+
+### Git
+- Commit: `b76cb44`
+- Tag: `v0.2`
+
+---
+
 ## 2026-06-23: New Filename Convention
 
 ### Change: Output filenames now match existing library naming style

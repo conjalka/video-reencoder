@@ -194,6 +194,7 @@ class VideoReencoder:
             'processed': 0,
             'skipped': 0,
             'skipped_encoded': 0,
+            'skipped_larger': 0,
             'failed': 0,
             'space_saved': 0
         }
@@ -228,7 +229,7 @@ class VideoReencoder:
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
-                logging.FileHandler(log_path),
+                logging.FileHandler(log_path, encoding='utf-8'),
                 logging.StreamHandler(sys.stdout)
             ]
         )
@@ -302,6 +303,8 @@ class VideoReencoder:
                 [self.handbrake_path, "--version"],
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=10
             )
             if result.returncode == 0:
@@ -848,7 +851,19 @@ class VideoReencoder:
             
             self.logger.info(f"New size: {self.format_size(new_size)}")
             self.logger.info(f"Space saved: {self.format_size(size_diff)} ({percent_saved:.1f}%)")
-            
+
+            # If the re-encode is larger than the original, keep the original.
+            # This happens when the source is already a high-quality encode and
+            # x265 at the chosen CRF can't beat it.
+            if new_size >= original_size:
+                self.logger.warning(
+                    f"Re-encoded file is {self.format_size(new_size - original_size)} "
+                    f"larger than original — keeping original, deleting temp file"
+                )
+                output_path.unlink()
+                self.stats['skipped_larger'] += 1
+                return True
+
             # Replace original file with reencoded version
             self.logger.info("Replacing original file...")
             
@@ -989,6 +1004,8 @@ class VideoReencoder:
         self.logger.info(f"Skipped (already HEVC): {self.stats['skipped']}")
         if self.stats['skipped_encoded'] > 0:
             self.logger.info(f"Skipped (already encoded in filename): {self.stats['skipped_encoded']}")
+        if self.stats['skipped_larger'] > 0:
+            self.logger.info(f"Skipped (x265 output larger than original): {self.stats['skipped_larger']}")
         self.logger.info(f"Failed: {self.stats['failed']}")
         self.logger.info(f"Total space saved: {self.format_size(self.stats['space_saved'])}")
         if self.backup_dir:
