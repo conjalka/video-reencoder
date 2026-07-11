@@ -2,6 +2,31 @@
 
 All notable changes to the Video Reencoding Project.
 
+## [0.7.0] - 2026-07-XX
+
+### 🐛 Bug Fix — Pause/resume/quit controls (follow-up)
+
+#### Problems
+1. Pressing P a second time showed no PAUSED banner and R did nothing.
+2. Q only cancelled the current file — the rest of the queue kept encoding.
+
+#### Fixes
+1. **Repeated pause/resume**: The progress loop was only updating
+   `last_progress_line` when *not* paused. A queued progress line arriving
+   just after P was pressed would overwrite the PAUSED banner before the
+   paused flag was seen. Fixed by always storing the latest line regardless
+   of pause state, and switching the R-resume reprint from `\r`-overwrite
+   to a clean newline so there's no cursor-position race between threads.
+2. **Q stops entire queue**: Q now sets both `quit_now` (kills HandBrake
+   immediately) and `self.quit_after_current` so `_process_sequential`
+   breaks out of the file loop after cleanup. One Q press = fully stopped.
+
+### Changed
+- `video_reencoder.py`: `key_listener` and main progress loop in
+  `reencode_video()`.
+
+---
+
 ## [0.6.0] - 2026-07-XX
 
 ### 🐛 Bug Fix — P/R/Q keyboard controls during encoding
