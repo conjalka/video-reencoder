@@ -4,7 +4,7 @@ Video Reencoding Script
 Automatically converts video files to HEVC/H.265 format using HandBrake
 """
 
-__version__ = "0.5"
+__version__ = "0.6"
 
 import os
 import sys

@@ -2,6 +2,38 @@
 
 All notable changes to the Video Reencoding Project.
 
+## [0.6.0] - 2026-07-XX
+
+### 🐛 Bug Fix — P/R/Q keyboard controls during encoding
+
+#### Problem
+Pressing **P** to pause, **R** to resume, or **Q** to quit while HandBrake was
+encoding had no effect — nothing happened in the console.
+
+#### Root Cause
+The key-listener thread used a custom `ReadConsoleInputW` loop via `ctypes` with
+two fatal flaws:
+1. The `INVALID_HANDLE_VALUE` sentinel comparison was broken on 64-bit Python
+   (`ctypes.c_void_p(-1).value` is `-1`, but the handle is `0xFFFFFFFFFFFFFFFF`),
+   so handle-open failures went silently undetected.
+2. `ReadConsoleInputW` blocks on all console events (mouse moves, focus changes,
+   resize) — not just keystrokes — causing actual key presses to be dropped or
+   lost entirely when HandBrake shared the parent console.
+
+#### Fix
+Replaced the entire `ReadConsoleInputW` / `_wake_console_input` mechanism (~100
+lines) with `msvcrt.kbhit()` + `msvcrt.getwch()` (~15 lines). The `msvcrt` module
+is Python's standard library wrapper for exactly this purpose: non-blocking,
+no-echo single-keystroke reading on Windows. The listener thread polls every 50 ms
+(imperceptible CPU cost) and shuts down cleanly via a threading event — no need to
+inject synthetic console input to unblock a blocking call.
+
+### Changed
+- `video_reencoder.py`: Removed `_wake_console_input()` helper; rewrote
+  `key_listener()` inner function in `reencode_video()`.
+
+---
+
 ## [2.0.0] - 2024-06-16
 
 ### 🎉 Major Enhancements - "Quick Wins" Release
