@@ -2,6 +2,38 @@
 
 All notable changes to the Video Reencoding Project.
 
+## [0.8.0] - 2026-07-XX
+
+### 🐛 Bug Fix — Pause banner disappears on second press; Q doesn't stop queue
+
+#### Problems
+1. Pressing P a second time printed the PAUSED banner but it was immediately
+   overwritten by buffered HandBrake output lines that were already sitting in
+   the queue before the process was suspended.
+2. Q killed the current HandBrake process but the file queue continued to the
+   next file. `self.quit_after_current` was being set *after* `quit_now.set()`
+   which could race with `process.kill()` throwing `OSError` and unwinding
+   before the flag was persisted.
+
+#### Fixes
+1. **PAUSED banner stays visible**: When the main progress loop receives a
+   progress line while `self._paused` is `True`, instead of silently dropping
+   it, it reprints the PAUSED banner with `\r` — so each buffered line that
+   drains out of the queue refreshes the banner rather than replacing it with
+   stale progress text.
+2. **Q stops the entire queue**: `self.quit_after_current = True` is now set
+   *before* `quit_now.set()` and `process.kill()`, so it's always persisted
+   even if `kill()` raises `OSError` (now caught). The main progress loop
+   condition is also `while not quit_now.is_set()` so it exits immediately
+   when Q is pressed without waiting for the EOF sentinel from the reader
+   thread.
+
+### Changed
+- `video_reencoder.py`: `key_listener` and main progress loop in
+  `reencode_video()`.
+
+---
+
 ## [0.7.0] - 2026-07-XX
 
 ### 🐛 Bug Fix — Pause/resume/quit controls (follow-up)

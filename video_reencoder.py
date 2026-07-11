@@ -4,7 +4,7 @@ Video Reencoding Script
 Automatically converts video files to HEVC/H.265 format using HandBrake
 """
 
-__version__ = "0.7"
+__version__ = "0.8"
 
 import os
 import sys
@@ -805,23 +805,22 @@ class VideoReencoder:
                         if key == 'P' and not self._paused:
                             self._paused = True
                             _suspend_process(process.pid)
-                            # Print on its own line, then reprint it so it persists
-                            # even if the progress loop overwrites with \r
                             print(f"\n  *** PAUSED ***  Press R to resume or Q to quit", flush=True)
                         elif key == 'R' and self._paused:
                             self._paused = False
                             _resume_process(process.pid)
-                            # Reprint the last known progress line so the display
-                            # recovers cleanly after the pause banner
                             print(f"  {progress_prefix}{last_progress_line[0]}", flush=True)
                         elif key == 'Q':
+                            self.quit_after_current = True
                             quit_now.set()
-                            self.quit_after_current = True  # also stops the queue
                             if self._paused:
                                 self._paused = False
                                 _resume_process(process.pid)
-                            print(f"\n  Quitting — terminating encode and keeping original...", flush=True)
-                            process.kill()
+                            print(f"\n  Quitting — terminating encode, deleting partial file...", flush=True)
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
                     else:
                         threading.Event().wait(0.05)
 
@@ -829,7 +828,7 @@ class VideoReencoder:
             listener_thread.start()
 
             # Main progress loop — drains the output queue.
-            while True:
+            while not quit_now.is_set():
                 try:
                     line = output_queue.get(timeout=0.1)
                 except queue.Empty:
@@ -840,11 +839,15 @@ class VideoReencoder:
                 if not line:
                     continue
                 if "Encoding:" in line or "%" in line:
-                    # While paused: update the stored line but don't print
-                    # (we don't want progress to overwrite the PAUSED banner)
                     last_progress_line[0] = line
+                    # Only print when not paused — buffered lines that arrived
+                    # just before the suspend must not overwrite the PAUSED banner
                     if not self._paused:
                         print(f"\r{progress_prefix}{line}", end='', flush=True)
+                    else:
+                        # Drain any stale buffered lines silently; reprint banner
+                        # so it stays visible at the bottom of the display
+                        print(f"\r  *** PAUSED ***  Press R to resume or Q to quit  ", flush=True)
                 else:
                     self.logger.debug(line)
 
