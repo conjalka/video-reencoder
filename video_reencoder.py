@@ -805,13 +805,18 @@ class VideoReencoder:
                         if key == 'P' and not self._paused:
                             self._paused = True
                             _suspend_process(process.pid)
-                            print(f"\n  *** PAUSED ***  Press R to resume or Q to quit immediately", flush=True)
+                            # Print on its own line, then reprint it so it persists
+                            # even if the progress loop overwrites with \r
+                            print(f"\n  *** PAUSED ***  Press R to resume or Q to quit", flush=True)
                         elif key == 'R' and self._paused:
                             self._paused = False
                             _resume_process(process.pid)
-                            print(f"\r{progress_prefix}{last_progress_line[0]}", end='', flush=True)
+                            # Reprint the last known progress line so the display
+                            # recovers cleanly after the pause banner
+                            print(f"  {progress_prefix}{last_progress_line[0]}", flush=True)
                         elif key == 'Q':
                             quit_now.set()
+                            self.quit_after_current = True  # also stops the queue
                             if self._paused:
                                 self._paused = False
                                 _resume_process(process.pid)
@@ -835,8 +840,10 @@ class VideoReencoder:
                 if not line:
                     continue
                 if "Encoding:" in line or "%" in line:
+                    # While paused: update the stored line but don't print
+                    # (we don't want progress to overwrite the PAUSED banner)
+                    last_progress_line[0] = line
                     if not self._paused:
-                        last_progress_line[0] = line
                         print(f"\r{progress_prefix}{line}", end='', flush=True)
                 else:
                     self.logger.debug(line)
