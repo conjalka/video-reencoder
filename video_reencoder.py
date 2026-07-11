@@ -9,6 +9,7 @@ __version__ = "0.6"
 import os
 import sys
 import json
+import queue
 import subprocess
 import logging
 import argparse
@@ -773,61 +774,84 @@ class VideoReencoder:
             else:
                 progress_prefix = ""
 
+            # quit_now is set by Q keypress — kills HandBrake immediately.
+            quit_now = threading.Event()
+            # Lines from HandBrake stdout are put here by the reader thread.
+            output_queue = queue.Queue()
+
+            def stdout_reader():
+                """Read HandBrake stdout into a queue so the main loop isn't blocked."""
+                try:
+                    for line in process.stdout:
+                        output_queue.put(line)
+                finally:
+                    output_queue.put(None)  # sentinel — EOF
+
+            reader_thread = threading.Thread(target=stdout_reader, daemon=True)
+            reader_thread.start()
+
             # Key-listener thread — watches for P / R / Q while HandBrake runs.
             # Uses msvcrt.kbhit()/getwch() so keypresses are received even while
-            # the main thread is blocked reading HandBrake's stdout pipe.
-            stop_listener = threading.Event()
+            # the reader thread is blocking on the stdout pipe.
             last_progress_line = ['']
 
             def key_listener():
                 if sys.platform != 'win32':
                     return
                 import msvcrt
-                while not stop_listener.is_set():
+                while not quit_now.is_set() and process.poll() is None:
                     if msvcrt.kbhit():
-                        # getwch() reads one wide char without echoing or blocking
                         key = msvcrt.getwch().upper()
                         if key == 'P' and not self._paused:
                             self._paused = True
                             _suspend_process(process.pid)
-                            print()
-                            print("  *** PAUSED ***  Press R to resume or Q to quit after this file")
+                            print(f"\n  *** PAUSED ***  Press R to resume or Q to quit immediately", flush=True)
                         elif key == 'R' and self._paused:
                             self._paused = False
                             _resume_process(process.pid)
                             print(f"\r{progress_prefix}{last_progress_line[0]}", end='', flush=True)
                         elif key == 'Q':
-                            self.quit_after_current = True
+                            quit_now.set()
                             if self._paused:
-                                # Resume so HandBrake can finish normally
                                 self._paused = False
                                 _resume_process(process.pid)
-                                print()
-                            print()
-                            print("  Quit requested — finishing current file then stopping...")
+                            print(f"\n  Quitting — terminating encode and keeping original...", flush=True)
+                            process.kill()
                     else:
-                        # Sleep briefly to avoid busy-spinning the CPU
                         threading.Event().wait(0.05)
 
             listener_thread = threading.Thread(target=key_listener, daemon=True)
             listener_thread.start()
 
-            # Monitor progress
-            if process.stdout:
-                for line in process.stdout:
-                    line = line.strip()
-                    if line:
-                        if "Encoding:" in line or "%" in line:
-                            if not self._paused:
-                                last_progress_line[0] = line
-                                print(f"\r{progress_prefix}{line}", end='', flush=True)
-                        else:
-                            self.logger.debug(line)
+            # Main progress loop — drains the output queue.
+            while True:
+                try:
+                    line = output_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if line is None:  # EOF sentinel
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                if "Encoding:" in line or "%" in line:
+                    if not self._paused:
+                        last_progress_line[0] = line
+                        print(f"\r{progress_prefix}{line}", end='', flush=True)
+                else:
+                    self.logger.debug(line)
 
-            stop_listener.set()
             listener_thread.join(timeout=0.2)
             print()  # New line after progress
             process.wait()
+
+            # Q was pressed — clean up the partial output and stop.
+            if quit_now.is_set():
+                if output_path.exists():
+                    output_path.unlink()
+                allow_sleep()
+                self.logger.info("Encoding cancelled by user — partial file deleted, original kept.")
+                return False
             
             # Re-allow system sleep
             if sleep_prevented:
