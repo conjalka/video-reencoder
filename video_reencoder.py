@@ -168,57 +168,6 @@ def _resume_process(pid: int):
     kernel32.CloseHandle(h_snapshot)
 
 
-def _wake_console_input():
-    """Post a harmless synthetic key event to unblock a ReadConsoleInputW call (Windows only).
-    Used to cleanly shut down the key-listener thread after encoding finishes."""
-    if sys.platform != 'win32':
-        return
-    GENERIC_WRITE    = 0x40000000
-    FILE_SHARE_WRITE = 0x00000002
-    OPEN_EXISTING    = 3
-    kernel32 = ctypes.windll.kernel32
-    hConOut = kernel32.CreateFileW(
-        "CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None
-    )
-    if hConOut == ctypes.c_void_p(-1).value:
-        return
-
-    class KEY_EVENT_RECORD(ctypes.Structure):
-        _fields_ = [
-            ('bKeyDown',          ctypes.c_int),
-            ('wRepeatCount',      ctypes.c_ushort),
-            ('wVirtualKeyCode',   ctypes.c_ushort),
-            ('wVirtualScanCode',  ctypes.c_ushort),
-            ('uChar',             ctypes.c_wchar),
-            ('dwControlKeyState', ctypes.c_ulong),
-        ]
-
-    class INPUT_RECORD(ctypes.Structure):
-        _fields_ = [
-            ('EventType', ctypes.c_ushort),
-            ('_pad',      ctypes.c_ushort),
-            ('Event',     KEY_EVENT_RECORD),
-        ]
-
-    # WriteConsoleInput writes directly to CONIN$ regardless of which handle we use,
-    # so open CONIN$ for write instead
-    kernel32.CloseHandle(hConOut)
-    GENERIC_WRITE_READ = GENERIC_WRITE | 0x80000000
-    hConIn = kernel32.CreateFileW(
-        "CONIN$", GENERIC_WRITE_READ, FILE_SHARE_WRITE | 0x00000001, None, OPEN_EXISTING, 0, None
-    )
-    if hConIn == ctypes.c_void_p(-1).value:
-        return
-    rec = INPUT_RECORD()
-    rec.EventType = 0x0001          # KEY_EVENT
-    rec.Event.bKeyDown = 1
-    rec.Event.wVirtualKeyCode = 0   # no actual key — uChar is NUL, listener ignores it
-    rec.Event.uChar = '\x00'
-    written = ctypes.c_ulong(0)
-    kernel32.WriteConsoleInputW(hConIn, ctypes.byref(rec), 1, ctypes.byref(written))
-    kernel32.CloseHandle(hConIn)
-
-
 class VideoReencoder:
     """Main class for video reencoding operations"""
     
@@ -825,63 +774,19 @@ class VideoReencoder:
                 progress_prefix = ""
 
             # Key-listener thread — watches for P / R / Q while HandBrake runs.
-            # Uses blocking getwch() so keypresses are received even while the
-            # main thread is blocked reading HandBrake's stdout pipe.
+            # Uses msvcrt.kbhit()/getwch() so keypresses are received even while
+            # the main thread is blocked reading HandBrake's stdout pipe.
             stop_listener = threading.Event()
             last_progress_line = ['']
 
             def key_listener():
                 if sys.platform != 'win32':
                     return
-                # Open the console input handle directly via Win32 API.
-                # This bypasses the C-runtime msvcrt buffer and works reliably
-                # even when the process's stdout/stderr are redirected to pipes.
-                GENERIC_READ    = 0x80000000
-                FILE_SHARE_READ = 0x00000001
-                OPEN_EXISTING   = 3
-                hConIn = ctypes.windll.kernel32.CreateFileW(
-                    "CONIN$", GENERIC_READ, FILE_SHARE_READ,
-                    None, OPEN_EXISTING, 0, None
-                )
-                if hConIn == ctypes.c_void_p(-1).value:
-                    return  # Could not open console input — silently give up
-
-                # INPUT_RECORD structure (Windows API)
-                class KEY_EVENT_RECORD(ctypes.Structure):
-                    _fields_ = [
-                        ('bKeyDown',         ctypes.c_int),
-                        ('wRepeatCount',     ctypes.c_ushort),
-                        ('wVirtualKeyCode',  ctypes.c_ushort),
-                        ('wVirtualScanCode', ctypes.c_ushort),
-                        ('uChar',            ctypes.c_wchar),   # union; wchar covers UnicodeChar
-                        ('dwControlKeyState',ctypes.c_ulong),
-                    ]
-
-                class INPUT_RECORD(ctypes.Structure):
-                    _fields_ = [
-                        ('EventType', ctypes.c_ushort),
-                        ('_pad',      ctypes.c_ushort),   # alignment
-                        ('Event',     KEY_EVENT_RECORD),  # largest union member
-                    ]
-
-                KEY_EVENT = 0x0001
-                records_read = ctypes.c_ulong(0)
-                buf = (INPUT_RECORD * 1)()
-
-                try:
-                    while not stop_listener.is_set():
-                        # ReadConsoleInput blocks until at least one event is available
-                        ok = ctypes.windll.kernel32.ReadConsoleInputW(
-                            hConIn, buf, 1, ctypes.byref(records_read)
-                        )
-                        if not ok or stop_listener.is_set():
-                            break
-                        rec = buf[0]
-                        if rec.EventType != KEY_EVENT:
-                            continue
-                        if not rec.Event.bKeyDown:
-                            continue   # only act on key-down events
-                        key = rec.Event.uChar.upper()
+                import msvcrt
+                while not stop_listener.is_set():
+                    if msvcrt.kbhit():
+                        # getwch() reads one wide char without echoing or blocking
+                        key = msvcrt.getwch().upper()
                         if key == 'P' and not self._paused:
                             self._paused = True
                             _suspend_process(process.pid)
@@ -900,8 +805,9 @@ class VideoReencoder:
                                 print()
                             print()
                             print("  Quit requested — finishing current file then stopping...")
-                finally:
-                    ctypes.windll.kernel32.CloseHandle(hConIn)
+                    else:
+                        # Sleep briefly to avoid busy-spinning the CPU
+                        threading.Event().wait(0.05)
 
             listener_thread = threading.Thread(target=key_listener, daemon=True)
             listener_thread.start()
@@ -919,11 +825,7 @@ class VideoReencoder:
                             self.logger.debug(line)
 
             stop_listener.set()
-            # Unblock the ReadConsoleInputW call in the listener thread by posting
-            # a synthetic key event to the console input queue.
-            if sys.platform == 'win32':
-                _wake_console_input()
-            listener_thread.join(timeout=1.0)
+            listener_thread.join(timeout=0.2)
             print()  # New line after progress
             process.wait()
             

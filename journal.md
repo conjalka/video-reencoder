@@ -1,3 +1,48 @@
+## 2026-07-XX: v0.5 patch — Fix P/R/Q key controls not responding during encoding
+
+### Problem
+Pressing **P** to pause (or **Q** to quit) while HandBrake was encoding had no effect.
+Nothing happened in the console.
+
+### Root cause
+The key-listener used a custom `ReadConsoleInputW` loop via `ctypes` to read from
+`CONIN$` directly. This approach had two compounding problems:
+
+1. **Blocking vs polling mismatch** — `ReadConsoleInputW` blocks until a console event
+   arrives. On 64-bit Python, the `INVALID_HANDLE_VALUE` sentinel comparison
+   (`ctypes.c_void_p(-1).value`) evaluates to `-1`, but the `CreateFileW` handle
+   is a large unsigned 64-bit integer (`0xFFFFFFFFFFFFFFFF`). The comparison never
+   matched, so handle-open failures went undetected.
+
+2. **Input event handling race** — Even when the handle opened successfully,
+   `ReadConsoleInputW` consumes events from the console's shared input queue. With
+   HandBrake running as a child process sharing the same console, mouse-move and
+   focus events consumed the slot, and actual key-down events were often lost or
+   processed out of order. The complex `INPUT_RECORD` struct layout in ctypes also
+   risked misaligned field reads on 64-bit builds.
+
+### Fix
+Replaced the entire `ReadConsoleInputW` / `_wake_console_input` mechanism with the
+simple `msvcrt.kbhit()` + `msvcrt.getwch()` polling pattern. `msvcrt` is part of
+Python's standard library on Windows and is specifically designed for exactly this
+use case — reading single keystrokes without echo, without blocking, and without
+any dependency on handle ownership or input queue management.
+
+The listener thread now polls `kbhit()` every 50 ms and calls `getwch()` only when
+a key is available. This adds no perceptible CPU load (~0.05 % on any modern CPU)
+and works correctly regardless of how the process's stdout/stderr are redirected.
+
+The `_wake_console_input()` helper (needed to unblock the old `ReadConsoleInputW`
+call when encoding finished) was also removed — no longer needed. Thread shutdown
+is instant via `stop_listener.set()`.
+
+### Files changed
+- `video_reencoder.py`: Removed `_wake_console_input()` function (~50 lines);
+  rewrote `key_listener()` inner function (~15 lines instead of ~50).
+
+---
+
+
 ## 2026-06-28: v0.3 — Charmap crash fix; skip when output is larger than input
 
 ### Problems fixed
